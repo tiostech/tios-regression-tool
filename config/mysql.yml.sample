@@ -1,0 +1,11 @@
+---
+# MySQL connection settings for the Regression Tool (GenForecast Pro) app.
+# Copy to config/mysql.yml and fill in real values for local dev.
+# On servers, Salt provisions config/mysql.yml from the secrets dir
+# (regression-tool-appconfig/mysql.yml).
+mysql_slave:
+  host: 127.0.0.1
+  port: 3309
+  database: tioscore_production
+  username: CHANGE_ME
+  password: CHANGE_ME

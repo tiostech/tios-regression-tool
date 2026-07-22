@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+plotly
+xgboost
+scikit-learn
+pymysql
+sqlalchemy
+cryptography
+pyyaml
+statsmodels

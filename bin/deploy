@@ -1,0 +1,100 @@
+#!/usr/bin/env ruby
+
+# Deploy the Regression Tool (GenForecast Pro) Streamlit app to its EC2 instances.
+#
+# For each running instance matching the configured tag:Name prefix and env, this
+# script SSHes in as tiostech, pulls the requested branch, reinstalls the venv
+# dependencies, and restarts the systemd service.
+#
+# Mirrors the pattern of ~/dev/tios-ice-shiny/bin/deploy.
+
+require 'yaml'
+require 'shellwords'
+
+print "ALERT : This is a dangerous command to run!!! It will deploy the Regression Tool app. Be sure that you know what you are doing. Do you want to continue? (yes/no) : "
+permission = $stdin.gets.chomp
+puts ""
+
+unless permission == 'yes'
+  puts "See You Later! ~ next time type yes"
+  exit(-1)
+end
+
+##### PREFLIGHT-CHECK: Test git branch status.
+git_st = `git status`
+if git_st =~ /Your branch is up.to.date/ && git_st =~ /nothing to commit, working .* clean/
+  puts 'Your Git Repo is clean.... Proceeding....'
+else
+  puts 'ERROR: Your git repo is not clean/up-to-date. Sync up with origin first.'
+  puts git_st
+  exit(-1)
+end
+
+git_branch = `git branch --no-color 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \\(.*\\)/\\1/'`.chomp.strip
+
+if git_branch != 'master'
+  unless ENV['ALLOW_NON_MASTER']
+    puts "You are on non-master branch: #{git_branch}. To proceed with deploy, switch to master or prefix this command with ALLOW_NON_MASTER=1"
+    exit(-1)
+  end
+end
+
+puts "Using Git branch: <#{git_branch}>"
+
+yaml_path = File.expand_path(__dir__ + "/../config/instances.yml")
+unless File.exist?(yaml_path)
+  puts "Missing #{yaml_path} - should be in git"
+  exit(-1)
+end
+
+specs        = YAML.load(File.open(yaml_path, 'rb').read)
+elb_rootname = specs['elb_rootname']
+ec2_rootname = specs['ec2_rootname']
+service_name = specs['service_name'] || 'regression-tool'
+basedir      = File.basename(File.expand_path(__dir__ + "/.."))
+deploy_dir   = "/ebsmount/www/#{basedir}"
+
+# Which environment to target (defaults to production, matches the tag:env filter).
+env = ENV['DEPLOY_ENV'] || 'production'
+
+print "Please enter the secondary name for the app you want to deploy (e.g. for 'https://#{elb_rootname}-primary.tioscapital.com' secondary name = 'primary') --> "
+secondary_name = $stdin.gets.chomp
+
+cmd = "aws ec2 describe-instances --region us-east-1 " \
+      "--filters 'Name=tag:Name,Values=#{ec2_rootname}-#{secondary_name}.*' " \
+      "'Name=tag:env,Values=#{env}' " \
+      "'Name=instance-state-name,Values=running' " \
+      "--query 'Reservations[*].Instances[*].PrivateIpAddress' --output text"
+
+output = `#{cmd}`.strip
+
+if output.empty?
+  puts "There are no #{env} instances with this secondary name! --> #{secondary_name}"
+  exit(-1)
+end
+
+puts "deploy started..."
+
+instances = output.split
+
+instances.map do |ip|
+  Thread.new do
+    remote = <<~REMOTE
+      set -e
+      cd #{deploy_dir}
+      git fetch --all
+      git checkout #{git_branch}
+      git pull
+      if [ -f requirements.txt ]; then
+        .venv/bin/pip install --upgrade pip
+        .venv/bin/pip install -r requirements.txt
+      fi
+      sudo systemctl restart #{service_name}
+    REMOTE
+
+    puts "==> deploying to #{ip}"
+    system("ssh", "-o", "StrictHostKeyChecking=no", "tiostech@#{ip}", "bash -l -c #{remote.shellescape}")
+  end
+end.each(&:join)
+
+puts "Deployment finished..."

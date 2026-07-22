@@ -38,32 +38,45 @@ MISO_CUSTOM_CONSTRAINTS = [ 29321,224129,224135,224133,224129,224130,224132,2241
 # ==============================================================================
 
 
-def load_credentials_from_file():
-    """
-    Dynamically loads database credentials from the local YAML config file
-    located at ~/dev/tios-quant-playground/config/tiosq_dbconfig.yml
-    """
-    home_dir = os.path.expanduser("~")
-    config_path = os.path.join(
-        home_dir, "dev", "tios-quant-playground", "config", "tiosq_dbconfig.yml"
+def _mysql_config_path():
+    """Path to the MySQL config, kept alongside app.py in config/mysql.yml."""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "config", "mysql.yml"
     )
+
+
+def load_mysql_config():
+    """
+    Loads the MySQL connection settings from config/mysql.yml.
+
+    Expected structure:
+        mysql_slave:
+          host: 127.0.0.1
+          port: 3309
+          database: tioscore_production
+          username: <user>
+          password: <pass>
+    Returns the mysql_slave dict (empty dict if the file is missing/invalid).
+    """
+    config_path = _mysql_config_path()
 
     if os.path.exists(config_path):
         try:
             with open(config_path, "r") as f:
-                config_data = yaml.safe_load(f)
-            
-            slave_creds = config_data.get("mysql_slave", {})
-            username = slave_creds.get("username", "")
-            password = slave_creds.get("password", "")
-            
-            return username, password
+                config_data = yaml.safe_load(f) or {}
+            return config_data.get("mysql_slave", {}) or {}
         except Exception as e:
             st.sidebar.error(f"Error parsing YAML config: {e}")
-            return "", ""
+            return {}
     else:
         st.sidebar.warning(f"Config file not found at: {config_path}")
-    return "", ""
+    return {}
+
+
+def load_credentials_from_file():
+    """Returns (username, password) from config/mysql.yml for the sidebar."""
+    creds = load_mysql_config()
+    return creds.get("username", ""), creds.get("password", "")
 
 
 st.set_page_config(
@@ -138,8 +151,12 @@ VENDOR_CONFIG = {
 
 
 def get_engine(uid, pwd):
+    cfg = load_mysql_config()
+    host = cfg.get("host", "127.0.0.1")
+    port = cfg.get("port", 3309)
+    database = cfg.get("database", "tioscore_production")
     return create_engine(
-        f"mysql+pymysql://{uid}:{pwd}@127.0.0.1:3309/tioscore_production",
+        f"mysql+pymysql://{uid}:{pwd}@{host}:{port}/{database}",
         pool_pre_ping=True,
     )
 

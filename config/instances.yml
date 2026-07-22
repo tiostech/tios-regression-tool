@@ -1,0 +1,10 @@
+---
+# Deploy targets for bin/deploy.
+#
+# elb_rootname   : the load balancer name (used only for the friendly URL prompt)
+# ec2_rootname   : the EC2 tag:Name prefix / Salt primary_name (matches the
+#                  tiosaws launcher's self.primary_name -> 'regressiontool')
+# service_name   : the systemd service that runs the Streamlit app on the box
+elb_rootname: regression-tool
+ec2_rootname: regressiontool
+service_name: regression-tool
