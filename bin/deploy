@@ -48,7 +48,6 @@ unless File.exist?(yaml_path)
 end
 
 specs        = YAML.load(File.open(yaml_path, 'rb').read)
-elb_rootname = specs['elb_rootname']
 ec2_rootname = specs['ec2_rootname']
 service_name = specs['service_name'] || 'regression-tool'
 basedir      = File.basename(File.expand_path(__dir__ + "/.."))
@@ -57,11 +56,9 @@ deploy_dir   = "/ebsmount/www/#{basedir}"
 # Which environment to target (defaults to production, matches the tag:env filter).
 env = ENV['DEPLOY_ENV'] || 'production'
 
-print "Please enter the secondary name for the app you want to deploy (e.g. for 'https://#{elb_rootname}-primary.tioscapital.com' secondary name = 'primary') --> "
-secondary_name = $stdin.gets.chomp
-
+# Single-env tool -- deploy to every running instance of the app.
 cmd = "aws ec2 describe-instances --region us-east-1 " \
-      "--filters 'Name=tag:Name,Values=#{ec2_rootname}-#{secondary_name}.*' " \
+      "--filters 'Name=tag:Name,Values=#{ec2_rootname}-*' " \
       "'Name=tag:env,Values=#{env}' " \
       "'Name=instance-state-name,Values=running' " \
       "--query 'Reservations[*].Instances[*].PrivateIpAddress' --output text"
@@ -69,7 +66,7 @@ cmd = "aws ec2 describe-instances --region us-east-1 " \
 output = `#{cmd}`.strip
 
 if output.empty?
-  puts "There are no #{env} instances with this secondary name! --> #{secondary_name}"
+  puts "There are no running #{env} instances for #{ec2_rootname}!"
   exit(-1)
 end
 
