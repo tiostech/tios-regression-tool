@@ -80,7 +80,7 @@ def load_credentials_from_file():
 
 
 st.set_page_config(
-    page_title="GenForecast Pro", layout="wide", initial_sidebar_state="expanded"
+    page_title="Regression Tool", layout="wide", initial_sidebar_state="expanded"
 )
 
 st.markdown(
