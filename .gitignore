@@ -1,3 +1,4 @@
 # Real DB credentials -- provisioned by Salt from the secrets dir on servers,
 # and copied from config/mysql.yml.sample for local dev. Never commit real creds.
 config/mysql.yml
+.venv
