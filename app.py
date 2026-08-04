@@ -8,25 +8,13 @@ from sqlalchemy.exc import OperationalError
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.impute import SimpleImputer
 from datetime import timedelta, datetime
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 import sys
 import os
 import re
 import yaml
-
-# ==============================================================================
-# 🎯 SHARED DESK TEMPLATES / CUSTOM VARIABLE ADJUSTMENTS
-# ==============================================================================
-# Instruct your teams to add or adjust their pre-defined logic rules inside this
-# multi-line string. It will instantly populate the template popup button below.
-# ==============================================================================
-TEAM_TEMPLATES = """
-# --- MISO DESK CUSTOM VARS ---
-IA_STRESS = (miso_load_ALTW + miso_load_MEC) - miso_wind_Meteologica_North_Iowa
-ND_STRESS = miso_load_MDU - miso_wind_Meteologica_North_North-Dakota
-"""
-# ==============================================================================
 
 # ==============================================================================
 # 🔍 MISO CUSTOM PATH: SHADOW PRICE CONSTRAINTS CONFIG
@@ -115,7 +103,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Generator Forecast & Error Analysis")
+st.title("Regression Tool")
 
 ISOS = ["caiso", "ercot", "isone", "miso", "nyiso", "pjm", "spp"]
 
@@ -300,6 +288,8 @@ def pull_meteo_features(
                 if df.empty:
                     continue
 
+                df = df.groupby(["dt", "hr", "region"], as_index=False)["target_val"].mean()
+
                 df["region"] = (
                     f"{iso}_"
                     + df["region"]
@@ -308,9 +298,6 @@ def pull_meteo_features(
                 )
                 df["dt"] = pd.to_datetime(df["dt"])
                 df["hr"] = df["hr"].astype(int)
-                # Add Day of Week and Month cyclical or categorical features
-                df["dow"] = df["dt"].dt.dayofweek
-                df["is_weekend"] = df["dow"].isin([5, 6]).astype(int)
 
                 pivot = df.pivot(
                     index=["dt", "hr"], columns="region", values="target_val"
@@ -336,61 +323,66 @@ def pull_meteo_features(
     outage = fetch_and_pivot_all_isos(o_vars_working, "outage")
 
     maxar_pivot = pd.DataFrame()
-    maxar_mapping = parse_maxar_selections(maxar_cities)
-    
-    for iso, locations in maxar_mapping.items():
-        if not locations:
-            continue
+    if maxar_cities:
+        maxar_mapping = parse_maxar_selections(maxar_cities)
         
-        loc_ids_str = ", ".join([str(loc) for loc in locations])
-        
-        hist_query = f"""
-            SELECT dt, hr, location_id, feelslike 
-            FROM {iso}_maxar_weather_histories 
-            WHERE location_id IN ({loc_ids_str}) AND dt BETWEEN '{start_dt}' AND '{end_dt}'
-        """
-        
-        fc_query = f"""
-            SELECT f.dt, f.hr, f.location_id, f.feelslike 
-            FROM {iso}_maxar_weather_forecasts f
-            INNER JOIN (
-                SELECT dt, hr, location_id, MAX(forecast_time) as max_ft
-                FROM {iso}_maxar_weather_forecasts
-                WHERE f.forecast_time <= CONCAT(f.dt, ' 06:00:00') AND location_id IN ({loc_ids_str}) AND dt BETWEEN '{start_dt}' AND '{end_dt}'
-                GROUP BY dt, hr, location_id
-            ) latest ON f.dt = latest.dt AND f.hr = latest.hr AND f.location_id = latest.location_id AND f.forecast_time = latest.max_ft
-        """
-        
-        try:
-            df_maxar = pd.read_sql(fc_query, engine)
-            
-            if df_maxar.empty:
+        for iso, locations in maxar_mapping.items():
+            if not locations:
                 continue
+            
+            loc_ids_str = ", ".join([str(loc) for loc in locations])
+            
+            hist_query = f"""
+                SELECT dt, hr, location_id, feelslike 
+                FROM {iso}_maxar_weather_histories 
+                WHERE location_id IN ({loc_ids_str}) AND dt BETWEEN '{start_dt}' AND '{end_dt}'
+            """
+            
+            fc_query = f"""
+                SELECT f.dt, f.hr, f.location_id, f.feelslike 
+                FROM {iso}_maxar_weather_forecasts f
+                INNER JOIN (
+                    SELECT dt, hr, location_id, MAX(forecast_time) as max_ft
+                    FROM {iso}_maxar_weather_forecasts
+                    WHERE forecast_time <= CONCAT(dt, ' 06:00:00') AND location_id IN ({loc_ids_str}) AND dt BETWEEN '{start_dt}' AND '{end_dt}'
+                    GROUP BY dt, hr, location_id
+                ) latest ON f.dt = latest.dt AND f.hr = latest.hr AND f.location_id = latest.location_id AND f.forecast_time = latest.max_ft
+            """
+            
+            try:
+                df_maxar = pd.read_sql(hist_query, engine)
                 
-            maxar_name_map = {}
-            for item in maxar_cities:
-                match = re.search(r"\[([a-zA-Z0-9]+)\]\s+([^,]+).*\((\d+)\)", item)
-                if match:
-                    city_clean = re.sub(r"[^a-zA-Z0-9]", "", match.group(2)).lower()
-                    maxar_name_map[str(match.group(3))] = f"maxar_{city_clean}"
+                if df_maxar.empty:
+                    df_maxar = pd.read_sql(fc_query, engine)
+                    
+                if df_maxar.empty:
+                    continue
+                    
+                maxar_name_map = {}
+                for item in maxar_cities:
+                    match = re.search(r"\[([a-zA-Z0-9]+)\]\s+([^\(]+).*\((\d+)\)", item)
+                    if match:
+                        city_clean = re.sub(r"[^a-zA-Z0-9]", "_", match.group(2).strip()).lower()
+                        city_clean = re.sub(r"_+", "_", city_clean).strip("_")
+                        maxar_name_map[str(match.group(3))] = f"maxar_{city_clean}"
 
-            df_maxar["region"] = df_maxar["location_id"].astype(str).map(maxar_name_map).fillna(
-                f"maxar_{iso}_loc_" + df_maxar["location_id"].astype(str)
-            )
-            
-            df_maxar["dt"] = pd.to_datetime(df_maxar["dt"])
-            df_maxar["hr"] = df_maxar["hr"].astype(int)
-            
-            pivot = df_maxar.pivot(
-                index=["dt", "hr"], columns="region", values="feelslike"
-            ).reset_index()
-            
-            if maxar_pivot.empty:
-                maxar_pivot = pivot
-            else:
-                maxar_pivot = maxar_pivot.merge(pivot, on=["dt", "hr"], how="outer")
-        except Exception:
-            pass
+                df_maxar["region"] = df_maxar["location_id"].astype(str).map(maxar_name_map).fillna(
+                    f"maxar_{iso}_loc_" + df_maxar["location_id"].astype(str)
+                )
+                
+                df_maxar["dt"] = pd.to_datetime(df_maxar["dt"])
+                df_maxar["hr"] = df_maxar["hr"].astype(int)
+                
+                pivot = df_maxar.pivot(
+                    index=["dt", "hr"], columns="region", values="feelslike"
+                ).reset_index()
+                
+                if maxar_pivot.empty:
+                    maxar_pivot = pivot
+                else:
+                    maxar_pivot = maxar_pivot.merge(pivot, on=["dt", "hr"], how="outer")
+            except Exception:
+                pass
 
     f_df = pd.DataFrame()
     for other in [wind, load, solar, outage, maxar_pivot]:
@@ -399,8 +391,20 @@ def pull_meteo_features(
                 other if f_df.empty else f_df.merge(other, on=["dt", "hr"], how="outer")
             )
 
+    if not f_df.empty:
+        # Drop any duplicate rows for the same dt and hr from SQL outer joins
+        f_df = f_df.drop_duplicates(subset=["dt", "hr"]).reset_index(drop=True)
+
     if not f_df.empty and custom_dict:
-        f_df = f_df.sort_values(["dt", "hr"]).reset_index(drop=True)
+        f_df["time_temp"] = pd.to_datetime(f_df["dt"]) + f_df["hr"].apply(lambda x: timedelta(hours=int(x) - 1))
+        
+        # Deduplicate on timestamp before indexing
+        f_df = f_df.drop_duplicates(subset=["time_temp"]).sort_values("time_temp").set_index("time_temp")
+        
+        full_time_idx = pd.date_range(start=f_df.index.min(), end=f_df.index.max(), freq="1h")
+        f_df = f_df.reindex(full_time_idx)
+        f_df["dt"] = pd.to_datetime(f_df.index.date)
+        f_df["hr"] = f_df.index.hour + 1
 
         for custom_var, expression in custom_dict.items():
             evaluated_expr = expression
@@ -423,7 +427,7 @@ def pull_meteo_features(
                     f_df[temp_roll_col] = (
                         f_df[actual_col]
                         .shift(1)
-                        .rolling(window=window_size, min_periods=1)
+                        .rolling(window=f"{window_size}h", min_periods=1)
                         .mean()
                     )
 
@@ -467,17 +471,22 @@ def pull_meteo_features(
         if hidden_user_cols:
             f_df.drop(columns=hidden_user_cols, inplace=True)
 
+        f_df = f_df.reset_index(drop=True)
+
     return f_df
 
 
 def apply_time_features(df, selected_time_features):
-    if not selected_time_features:
-        return df
-    if "Hour of Day" in selected_time_features:
+    dt_series = pd.to_datetime(df["dt"])
+    df["dow_sin"] = np.sin(2 * np.pi * dt_series.dt.dayofweek / 7.0)
+    df["dow_cos"] = np.cos(2 * np.pi * dt_series.dt.dayofweek / 7.0)
+    df["is_weekend"] = dt_series.dt.dayofweek.isin([5, 6]).astype(int)
+
+    if selected_time_features and "Hour of Day" in selected_time_features:
         hr_ser = df["hr"].astype(int)
         df["time_hour_sin"] = np.sin(2 * np.pi * hr_ser / 24.0)
         df["time_hour_cos"] = np.cos(2 * np.pi * hr_ser / 24.0)
-    if "Is On-Peak (HE07-HE22)" in selected_time_features:
+    if selected_time_features and "Is On-Peak (HE07-HE22)" in selected_time_features:
         is_peak_hr = df["hr"].astype(int).between(7, 22)
         df["time_is_on_peak"] = is_peak_hr.astype(int)
     return df
@@ -507,8 +516,6 @@ if "connections_established" not in st.session_state:
     st.session_state.connections_established = False
 if "show_help" not in st.session_state:
     st.session_state.show_help = False
-if "show_templates" not in st.session_state:
-    st.session_state.show_templates = False
 
 auto_connect = bool(
     file_user and file_pass and not st.session_state.connections_established
@@ -695,19 +702,12 @@ selected_time_vars = st.sidebar.multiselect(
 )
 
 st.sidebar.markdown("---")
-hc1, hc2, hc3 = st.sidebar.columns([0.70, 0.15, 0.15])
+hc1, hc2 = st.sidebar.columns([0.85, 0.15])
 with hc1:
     st.markdown("### 4b. Custom Functions")
 with hc2:
-    if st.button("📋", help="Click to open team custom templates and variables"):
-        st.session_state.show_templates = not st.session_state.show_templates
-with hc3:
     if st.button("❓", help="Click to open/close variable calculation guide"):
         st.session_state.show_help = not st.session_state.show_help
-
-if st.session_state.show_templates:
-    st.sidebar.code(TEAM_TEMPLATES.strip(), language="python")
-    st.sidebar.markdown("---")
 
 if st.session_state.show_help:
     st.sidebar.info("""
@@ -727,6 +727,8 @@ if st.session_state.show_help:
       `IOWA_STRESS_3HR = rolling_average(_IOWA_STRESS, 3)`
         
         Note that in this case, the model only sees IOWA_STRESS_3HR, not _IOWA_STRESS due to the _ at the beggining
+
+        I recommend saving frequently used formulas in a notes app for quick access (e.g., IOWA_STRESS is commonly used for some of our MISO gen forecasts).
     """)
 
 custom_vars_input = st.sidebar.text_area(
@@ -871,7 +873,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
             y_train = plant_data_full["avg_output_mw"]
 
             features_list = [c for c in X_train.columns if c not in cols_to_drop]
-            X_train_clean = X_train[features_list]
+            X_train_clean = X_train[features_list].copy()
 
             total_hours = len(plant_data_full)
 
@@ -926,6 +928,13 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 cv_r2 = np.nan
                 mae = np.nan
 
+            imputer = SimpleImputer(strategy="median")
+            X_train_imputed = pd.DataFrame(
+                imputer.fit_transform(X_train_clean),
+                columns=features_list,
+                index=X_train_clean.index
+            )
+
             if tune_model and total_hours >= 48:
                 model = base_model.set_params(**test_model.get_params())
             else:
@@ -934,9 +943,8 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 else:
                     model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1)
 
-            model.fit(X_train_clean, y_train)
-
-            preds_in = model.predict(X_train_clean)
+            model.fit(X_train_imputed, y_train)
+            preds_in = model.predict(X_train_imputed)
 
             insample_r2 = r2_score(y_train, preds_in)
 
@@ -951,20 +959,74 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                     train_idx = plant_data_full["dt"].isin(train_days)
                     val_idx = plant_data_full["dt"] == val_day
                     
-                    X_tr_wf = X_train_clean[train_idx]
+                    X_tr_wf_raw = X_train_clean[train_idx]
                     y_tr_wf = y_train[train_idx]
-                    X_va_wf = X_train_clean[val_idx]
+                    X_va_wf_raw = X_train_clean[val_idx]
                     
-                    if not X_tr_wf.empty and not X_va_wf.empty:
-                        if tune_model and total_hours >= 48:
-                            wf_model = base_model.set_params(**test_model.get_params())
-                        else:
-                            if model_choice == "Random Forest":
-                                wf_model = RandomForestRegressor(n_estimators=200, max_depth=4, min_samples_leaf=10, random_state=42, n_jobs=-1)
-                            else:
-                                wf_model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1)
+                    if not X_tr_wf_raw.empty and not X_va_wf_raw.empty:
+                        fold_imputer = SimpleImputer(strategy="median")
+                        X_tr_wf = pd.DataFrame(
+                            fold_imputer.fit_transform(X_tr_wf_raw),
+                            columns=features_list
+                        )
+                        X_va_wf = pd.DataFrame(
+                            fold_imputer.transform(X_va_wf_raw),
+                            columns=features_list
+                        )
+
+                        fold_hours = len(X_tr_wf)
                         
-                        wf_model.fit(X_tr_wf, y_tr_wf)
+                        use_tuning = False
+                        if tune_model and fold_hours >= 96:
+                            try:
+                                gap_val = 24 if fold_hours >= 120 else 12
+                                cv_splits = min(3, max(2, (fold_hours - gap_val) // 36))
+                                fold_tscv = TimeSeriesSplit(n_splits=cv_splits, gap=gap_val)
+                                
+                                if model_choice == "Random Forest":
+                                    fold_base = RandomForestRegressor(random_state=42, n_jobs=-1)
+                                else:
+                                    fold_base = XGBRegressor(random_state=42, n_jobs=-1, learning_rate=0.05)
+                                    
+                                fold_search = RandomizedSearchCV(
+                                    estimator=fold_base,
+                                    param_distributions=param_dist,
+                                    n_iter=4,
+                                    cv=fold_tscv,
+                                    scoring="neg_mean_absolute_error",
+                                    random_state=42,
+                                    n_jobs=-1
+                                )
+                                fold_search.fit(X_tr_wf, y_tr_wf)
+                                wf_model = fold_search.best_estimator_
+                                use_tuning = True
+                            except ValueError:
+                                use_tuning = False
+
+                        if not use_tuning:
+                            if model_choice == "Random Forest":
+                                max_depth_val = 3 if fold_hours < 96 else 4
+                                min_samples_leaf_val = 2 if fold_hours < 96 else 10
+                                wf_model = RandomForestRegressor(
+                                    n_estimators=100,
+                                    max_depth=max_depth_val,
+                                    min_samples_leaf=min_samples_leaf_val,
+                                    random_state=42,
+                                    n_jobs=-1
+                                )
+                            else:
+                                max_depth_val = 2 if fold_hours < 96 else 3
+                                wf_model = XGBRegressor(
+                                    n_estimators=50 if fold_hours < 96 else 100,
+                                    max_depth=max_depth_val,
+                                    learning_rate=0.05,
+                                    subsample=0.8,
+                                    colsample_bytree=0.8,
+                                    random_state=42,
+                                    n_jobs=-1
+                                )
+                            wf_model.fit(X_tr_wf, y_tr_wf)
+
                         wf_preds[val_idx] = wf_model.predict(X_va_wf)
 
             plant_data_full["wf_preds"] = wf_preds
@@ -1002,14 +1064,9 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 X_fc = fc_features.drop(
                     columns=[c for c in cols_to_drop_fc if c in fc_features.columns]
                 )
-                # Implement an explicit Imputer fitted ONLY on training data
                 from sklearn.impute import SimpleImputer
 
-                imputer = SimpleImputer(strategy="median")
-                X_train_clean = pd.DataFrame(
-                    imputer.fit_transform(X_train_clean), 
-                    columns=features_list
-                )
+                X_fc = X_fc.reindex(columns=features_list, fill_value=np.nan)
                 X_fc = pd.DataFrame(
                     imputer.transform(X_fc), 
                     columns=features_list
@@ -1028,10 +1085,23 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
             else:
                 fc_list, bridge_df, forecast_df = [], pd.DataFrame(), pd.DataFrame()
 
-            m1, m2 = st.columns(2)
+            # Calculate Walk-Forward Out-of-Sample R² across all historical folds
+            valid_wf_mask = ~np.isnan(plant_data_full["wf_preds"])
+            if valid_wf_mask.any():
+                wf_oos_r2 = r2_score(
+                    plant_data_full.loc[valid_wf_mask, "avg_output_mw"],
+                    plant_data_full.loc[valid_wf_mask, "wf_preds"]
+                )
+            else:
+                wf_oos_r2 = np.nan
+
+            # Display metrics across 3 columns
+            m1, m2, m3 = st.columns(3)
             m1.metric("In-Sample R²", f"{insample_r2:.3f}")
+            m2.metric("Walk-Forward OOS R²", "N/A" if np.isnan(wf_oos_r2) else f"{wf_oos_r2:.3f}")
+            
             unit_label = "$" if gen_id == "RDT_DA_PRICES" else "MW"
-            m2.metric(
+            m3.metric(
                 "Tracking MAE (Last 24h)", "N/A" if np.isnan(mae) else f"{mae:.2f} {unit_label}"
             )
 
@@ -1122,10 +1192,18 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 else:
                     feat_comb = feat_train.sort_values("time")
 
+                ignored_time_features = {
+                    "dow", "dow_sin", "dow_cos", "is_weekend",
+                    "time_hour_sin", "time_hour_cos", "time_is_on_peak"
+                }
+
                 for feat in features_list:
-                    if feat.startswith("time_"):
+                    if feat.startswith("time_") or feat.startswith("dow_") or feat in ignored_time_features:
                         continue
-                    if feat in hidden_components and feat not in explicit_columns:
+                    
+                    is_maxar_feat = feat.startswith("maxar_") or "feelslike" in feat
+                    
+                    if not is_maxar_feat and (feat in hidden_components and feat not in explicit_columns):
                         continue
 
                     fig.add_trace(
@@ -1154,7 +1232,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
             st.plotly_chart(fig, use_container_width=True)
 
             if fc_list:
-                st.subheader(f"📋 Hourly Forecast ({fc_date})")
+                st.subheader(f"Hourly Forecast ({fc_date})")
                 st.code(", ".join(fc_list))
 
     except Exception as e:
