@@ -308,6 +308,9 @@ def pull_meteo_features(
                 )
                 df["dt"] = pd.to_datetime(df["dt"])
                 df["hr"] = df["hr"].astype(int)
+                # Add Day of Week and Month cyclical or categorical features
+                df["dow"] = df["dt"].dt.dayofweek
+                df["is_weekend"] = df["dow"].isin([5, 6]).astype(int)
 
                 pivot = df.pivot(
                     index=["dt", "hr"], columns="region", values="target_val"
@@ -353,7 +356,7 @@ def pull_meteo_features(
             INNER JOIN (
                 SELECT dt, hr, location_id, MAX(forecast_time) as max_ft
                 FROM {iso}_maxar_weather_forecasts
-                WHERE location_id IN ({loc_ids_str}) AND dt BETWEEN '{start_dt}' AND '{end_dt}'
+                WHERE f.forecast_time <= CONCAT(f.dt, ' 06:00:00') AND location_id IN ({loc_ids_str}) AND dt BETWEEN '{start_dt}' AND '{end_dt}'
                 GROUP BY dt, hr, location_id
             ) latest ON f.dt = latest.dt AND f.hr = latest.hr AND f.location_id = latest.location_id AND f.forecast_time = latest.max_ft
         """
@@ -419,6 +422,7 @@ def pull_meteo_features(
                     temp_roll_col = f"temp_roll_{actual_col}_{window_size}"
                     f_df[temp_roll_col] = (
                         f_df[actual_col]
+                        .shift(1)
                         .rolling(window=window_size, min_periods=1)
                         .mean()
                     )
@@ -809,7 +813,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
 
             if gen_id == "RDT_DA_PRICES":
                 df_actuals = time_grid.merge(df_actuals.drop(columns=["time"]), on=["dt", "hr"], how="left")
-                df_actuals["avg_output_mw"] = df_actuals["avg_output_mw"].fillna(0.0)
+                df_actuals = df_actuals.dropna(subset=["avg_output_mw"])
             else:
                 df_actuals = time_grid.merge(df_actuals.drop(columns=["time"]), on=["dt", "hr"], how="inner")
 
@@ -894,7 +898,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                     }
 
                 if tune_model:
-                    tscv = TimeSeriesSplit(n_splits=3)
+                    tscv = TimeSeriesSplit(n_splits=3, gap=24)
                     search = RandomizedSearchCV(
                         estimator=base_model,
                         param_distributions=param_dist,
@@ -998,7 +1002,18 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 X_fc = fc_features.drop(
                     columns=[c for c in cols_to_drop_fc if c in fc_features.columns]
                 )
-                X_fc = X_fc.reindex(columns=X_train_clean.columns, fill_value=np.nan)
+                # Implement an explicit Imputer fitted ONLY on training data
+                from sklearn.impute import SimpleImputer
+
+                imputer = SimpleImputer(strategy="median")
+                X_train_clean = pd.DataFrame(
+                    imputer.fit_transform(X_train_clean), 
+                    columns=features_list
+                )
+                X_fc = pd.DataFrame(
+                    imputer.transform(X_fc), 
+                    columns=features_list
+                )
 
                 fc_features["mw"] = model.predict(X_fc)
                 target_ts = pd.to_datetime(fc_date)
