@@ -813,7 +813,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
 
             if gen_id == "RDT_DA_PRICES":
                 df_actuals = time_grid.merge(df_actuals.drop(columns=["time"]), on=["dt", "hr"], how="left")
-                df_actuals = df_actuals.dropna(subset=["avg_output_mw"])
+                df_actuals["avg_output_mw"] = df_actuals["avg_output_mw"].fillna(0.0)
             else:
                 df_actuals = time_grid.merge(df_actuals.drop(columns=["time"]), on=["dt", "hr"], how="inner")
 
