@@ -906,7 +906,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                     )
                     search.fit(X_tr_backtest, y_tr_backtest)
                     test_model = search.best_estimator_
-                    st.info(f"⚙️ Optimized Hyperparameters: {search.best_params_}")
+                    st.info(f"Best Hyperparameters: {search.best_params_}")
                 else:
                     if model_choice == "Random Forest":
                         test_model = RandomForestRegressor(n_estimators=200, max_depth=4, min_samples_leaf=10, random_state=42, n_jobs=-1)
