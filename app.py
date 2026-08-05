@@ -234,6 +234,14 @@ def pull_meteo_features(
             else:
                 target_list = o_vars_working
 
+            # If it's MISO load, also add the PRT prefix variation so PRT lookup succeeds automatically
+            if vtype == "load" and iso == "miso":
+                prt_space = f"miso: PRT - {raw_region.replace('_', ' ')}"
+                prt_underscore = f"miso: PRT - {raw_region}"
+                for item in [prt_space, prt_underscore]:
+                    if item not in target_list:
+                        target_list.append(item)
+
             if reconstructed_space not in target_list:
                 target_list.append(reconstructed_space)
             if reconstructed_underscore not in target_list:
@@ -267,22 +275,37 @@ def pull_meteo_features(
             if not regions:
                 continue
 
-            reg_list = "', '".join(regions)
-
             if prefix == "load" and iso == "miso":
-                table = "miso_prt_loadtemp_forecasts"
-                region_col = "region_zone"
-                value_col = "load_mwh"
-            elif prefix == "outage":
-                table = f"{iso}_totalgen_on_outages"
-                region_col = "region"
-                value_col = "capacity_on_outage_mw"
-            else:
-                table = f"{iso}_meteologica_{prefix}_forecasts"
-                region_col = "region"
-                value_col = "power_mw"
+                prt_regions = [r.replace("PRT - ", "").strip() for r in regions if r.startswith("PRT - ")]
+                other_regions = [r.strip() for r in regions if not r.startswith("PRT - ")]
 
-            query = f"SELECT dt, hr, {region_col} AS region, {value_col} AS target_val FROM {table} WHERE {region_col} IN ('{reg_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+                queries = []
+                if prt_regions:
+                    prt_list = "', '".join(prt_regions)
+                    queries.append(
+                        f"SELECT dt, hr, region_zone AS region, load_mwh AS target_val FROM miso_prt_loadtemp_forecasts WHERE region_zone IN ('{prt_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+                    )
+                if other_regions:
+                    other_list = "', '".join(other_regions)
+                    # Query Meteologica first
+                    queries.append(
+                        f"SELECT dt, hr, region, power_mw AS target_val FROM miso_meteologica_load_forecasts WHERE region IN ('{other_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+                    )
+                    # Query PRT table as fallback for bare region names like ALTW / MEC
+                    queries.append(
+                        f"SELECT dt, hr, region_zone AS region, load_mwh AS target_val FROM miso_prt_loadtemp_forecasts WHERE region_zone IN ('{other_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+                    )
+
+                if not queries:
+                    continue
+                query = " UNION ALL ".join(queries)
+            elif prefix == "outage":
+                reg_list = "', '".join(regions)
+                query = f"SELECT dt, hr, region, capacity_on_outage_mw AS target_val FROM {iso}_totalgen_on_outages WHERE region IN ('{reg_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+            else:
+                reg_list = "', '".join(regions)
+                query = f"SELECT dt, hr, region, power_mw AS target_val FROM {iso}_meteologica_{prefix}_forecasts WHERE region IN ('{reg_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+
             try:
                 df = pd.read_sql(query, engine)
                 if df.empty:
@@ -581,16 +604,25 @@ if st.sidebar.button("Establish Connection", key="conn_btn") or auto_connect:
 
                 try:
                     if iso == "miso":
-                        l_df = pd.read_sql(
+                        # 1. Fetch PRT BA load regions
+                        prt_df = pd.read_sql(
                             "SELECT DISTINCT region_zone AS region FROM miso_prt_loadtemp_forecasts",
                             temp_engine,
                         )
+                        load_regs.extend([f"miso: PRT - {r}" for r in prt_df["region"].tolist() if r])
+
+                        # 2. Fetch Meteologica load regions (North, Central, South, ALL, LRZs)
+                        meteo_df = pd.read_sql(
+                            "SELECT DISTINCT region FROM miso_meteologica_load_forecasts",
+                            temp_engine,
+                        )
+                        load_regs.extend([f"miso: {r}" for r in meteo_df["region"].tolist() if r])
                     else:
                         l_df = pd.read_sql(
                             f"SELECT DISTINCT region FROM {iso}_meteologica_load_forecasts",
                             temp_engine,
                         )
-                    load_regs.extend([f"{iso}: {r}" for r in l_df["region"].tolist()])
+                        load_regs.extend([f"{iso}: {r}" for r in l_df["region"].tolist() if r])
                 except Exception:
                     pass
 
