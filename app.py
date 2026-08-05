@@ -884,14 +884,14 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 y_va_backtest = y_train.iloc[-24:]
 
                 if model_choice == "Random Forest":
-                    base_model = RandomForestRegressor(random_state=42, n_jobs=2)
+                    base_model = RandomForestRegressor(random_state=42, n_jobs=-1)
                     param_dist = {
                         "n_estimators": [100, 200],
                         "max_depth": [3, 5, 7],
                         "min_samples_leaf": [5, 10, 20]
                     }
                 else:
-                    base_model = XGBRegressor(random_state=42, n_jobs=2, learning_rate=0.05)
+                    base_model = XGBRegressor(random_state=42, n_jobs=-1, learning_rate=0.05)
                     param_dist = {
                         "n_estimators": [50, 100, 150],
                         "max_depth": [2, 3, 5],
@@ -908,16 +908,16 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                         cv=tscv,
                         scoring="neg_mean_absolute_error",
                         random_state=42,
-                        n_jobs=2
+                        n_jobs=-1
                     )
                     search.fit(X_tr_backtest, y_tr_backtest)
                     test_model = search.best_estimator_
                     st.info(f"Best Hyperparameters: {search.best_params_}")
                 else:
                     if model_choice == "Random Forest":
-                        test_model = RandomForestRegressor(n_estimators=200, max_depth=4, min_samples_leaf=10, random_state=42, n_jobs=2)
+                        test_model = RandomForestRegressor(n_estimators=200, max_depth=4, min_samples_leaf=10, random_state=42, n_jobs=-1)
                     else:
-                        test_model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=2)
+                        test_model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1)
 
                 test_model.fit(X_tr_backtest, y_tr_backtest)
                 backtest_preds = test_model.predict(X_va_backtest)
@@ -939,9 +939,9 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 model = base_model.set_params(**test_model.get_params())
             else:
                 if model_choice == "Random Forest":
-                    model = RandomForestRegressor(n_estimators=200, max_depth=4, min_samples_leaf=10, random_state=42, n_jobs=2)
+                    model = RandomForestRegressor(n_estimators=200, max_depth=4, min_samples_leaf=10, random_state=42, n_jobs=-1)
                 else:
-                    model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=2)
+                    model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1)
 
             model.fit(X_train_imputed, y_train)
             preds_in = model.predict(X_train_imputed)
@@ -984,9 +984,9 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                                 fold_tscv = TimeSeriesSplit(n_splits=cv_splits, gap=gap_val)
                                 
                                 if model_choice == "Random Forest":
-                                    fold_base = RandomForestRegressor(random_state=42, n_jobs=2)
+                                    fold_base = RandomForestRegressor(random_state=42, n_jobs=-1)
                                 else:
-                                    fold_base = XGBRegressor(random_state=42, n_jobs=2, learning_rate=0.05)
+                                    fold_base = XGBRegressor(random_state=42, n_jobs=-1, learning_rate=0.05)
                                     
                                 fold_search = RandomizedSearchCV(
                                     estimator=fold_base,
@@ -995,7 +995,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                                     cv=fold_tscv,
                                     scoring="neg_mean_absolute_error",
                                     random_state=42,
-                                    n_jobs=2
+                                    n_jobs=-1
                                 )
                                 fold_search.fit(X_tr_wf, y_tr_wf)
                                 wf_model = fold_search.best_estimator_
@@ -1012,7 +1012,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                                     max_depth=max_depth_val,
                                     min_samples_leaf=min_samples_leaf_val,
                                     random_state=42,
-                                    n_jobs=2
+                                    n_jobs=-1
                                 )
                             else:
                                 max_depth_val = 2 if fold_hours < 96 else 3
@@ -1023,7 +1023,7 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                                     subsample=0.8,
                                     colsample_bytree=0.8,
                                     random_state=42,
-                                    n_jobs=2
+                                    n_jobs=-1
                                 )
                             wf_model.fit(X_tr_wf, y_tr_wf)
 
