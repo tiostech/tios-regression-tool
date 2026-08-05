@@ -186,8 +186,8 @@ def extract_required_variables(custom_funcs_dict):
     return list(variables)
 
 
-def normalize_var_to_column(var_str):
-    """Converts user styles (miso_load_ALTW or miso_wind_Meteologica_North_Iowa) into internal columns"""
+def normalize_var_to_column(var_str, available_cols=[]):
+    """Converts user styles (miso_load_ALTW) into internal columns"""
     var_clean = var_str.replace(":", "").strip().lower()
     var_clean = re.sub(r"[^a-zA-Z0-9_]", "_", var_clean)
     parts = var_clean.split("_")
@@ -196,6 +196,10 @@ def normalize_var_to_column(var_str):
         iso, vtype = parts[0], parts[1]
         rest = "_".join(parts[2:])
         if vtype in ["load", "wind", "solar", "outage"] and iso in ISOS:
+            # Check if MISO PRT column exists in f_df columns
+            prt_candidate = f"{vtype}_{iso}_prt_{rest}"
+            if prt_candidate in available_cols:
+                return prt_candidate, iso, vtype, rest
             return f"{vtype}_{iso}_{rest}", iso, vtype, rest
 
     return None, None, None, None
@@ -275,69 +279,88 @@ def pull_meteo_features(
             if not regions:
                 continue
 
+            dfs_to_combine = []
+
             if prefix == "load" and iso == "miso":
                 prt_regions = [r.replace("PRT - ", "").strip() for r in regions if r.startswith("PRT - ")]
                 other_regions = [r.strip() for r in regions if not r.startswith("PRT - ")]
 
-                queries = []
                 if prt_regions:
                     prt_list = "', '".join(prt_regions)
-                    queries.append(
-                        f"SELECT dt, hr, region_zone AS region, load_mwh AS target_val FROM miso_prt_loadtemp_forecasts WHERE region_zone IN ('{prt_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
-                    )
+                    q_prt = f"""
+                        SELECT dt, hr, 
+                               CONCAT('prt_', LOWER(region_zone)) AS region, 
+                               load_mwh AS target_val 
+                        FROM miso_prt_loadtemp_forecasts 
+                        WHERE region_zone IN ('{prt_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'
+                    """
+                    try:
+                        df_prt = pd.read_sql(q_prt, engine)
+                        if not df_prt.empty:
+                            dfs_to_combine.append(df_prt)
+                    except Exception:
+                        pass
+
                 if other_regions:
                     other_list = "', '".join(other_regions)
-                    # Query Meteologica first
-                    queries.append(
-                        f"SELECT dt, hr, region, power_mw AS target_val FROM miso_meteologica_load_forecasts WHERE region IN ('{other_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
-                    )
-                    # Query PRT table as fallback for bare region names like ALTW / MEC
-                    queries.append(
-                        f"SELECT dt, hr, region_zone AS region, load_mwh AS target_val FROM miso_prt_loadtemp_forecasts WHERE region_zone IN ('{other_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
-                    )
+                    q_meteo = f"""
+                        SELECT dt, hr, LOWER(region) AS region, power_mw AS target_val 
+                        FROM miso_meteologica_load_forecasts 
+                        WHERE region IN ('{other_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'
+                    """
+                    try:
+                        df_meteo = pd.read_sql(q_meteo, engine)
+                        if not df_meteo.empty:
+                            dfs_to_combine.append(df_meteo)
+                    except Exception:
+                        pass
 
-                if not queries:
+                if not dfs_to_combine:
                     continue
-                query = " UNION ALL ".join(queries)
+                df = pd.concat(dfs_to_combine, ignore_index=True)
             elif prefix == "outage":
                 reg_list = "', '".join(regions)
                 query = f"SELECT dt, hr, region, capacity_on_outage_mw AS target_val FROM {iso}_totalgen_on_outages WHERE region IN ('{reg_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
+                try:
+                    df = pd.read_sql(query, engine)
+                except Exception:
+                    continue
             else:
                 reg_list = "', '".join(regions)
                 query = f"SELECT dt, hr, region, power_mw AS target_val FROM {iso}_meteologica_{prefix}_forecasts WHERE region IN ('{reg_list}') AND dt BETWEEN '{start_dt}' AND '{end_dt}'"
-
-            try:
-                df = pd.read_sql(query, engine)
-                if df.empty:
+                try:
+                    df = pd.read_sql(query, engine)
+                except Exception:
                     continue
 
-                df = df.groupby(["dt", "hr", "region"], as_index=False)["target_val"].mean()
+            if df.empty:
+                continue
 
-                df["region"] = (
-                    f"{iso}_"
-                    + df["region"]
-                    .str.replace(r"[^a-zA-Z0-9_]", "_", regex=True)
-                    .str.lower()
+            df = df.groupby(["dt", "hr", "region"], as_index=False)["target_val"].mean()
+
+            df["region"] = (
+                f"{iso}_"
+                + df["region"]
+                .str.replace(r"[^a-zA-Z0-9_]", "_", regex=True)
+                .str.lower()
+            )
+            df["dt"] = pd.to_datetime(df["dt"])
+            df["hr"] = df["hr"].astype(int)
+
+            pivot = df.pivot(
+                index=["dt", "hr"], columns="region", values="target_val"
+            ).reset_index()
+            pivot.columns = [
+                f"{prefix}_{c}" if c not in ["dt", "hr"] else c
+                for c in pivot.columns
+            ]
+
+            if master_pivot.empty:
+                master_pivot = pivot
+            else:
+                master_pivot = master_pivot.merge(
+                    pivot, on=["dt", "hr"], how="outer"
                 )
-                df["dt"] = pd.to_datetime(df["dt"])
-                df["hr"] = df["hr"].astype(int)
-
-                pivot = df.pivot(
-                    index=["dt", "hr"], columns="region", values="target_val"
-                ).reset_index()
-                pivot.columns = [
-                    f"{prefix}_{c}" if c not in ["dt", "hr"] else c
-                    for c in pivot.columns
-                ]
-
-                if master_pivot.empty:
-                    master_pivot = pivot
-                else:
-                    master_pivot = master_pivot.merge(
-                        pivot, on=["dt", "hr"], how="outer"
-                    )
-            except Exception:
-                pass
         return master_pivot
 
     wind = fetch_and_pivot_all_isos(w_vars_working, "wind")
@@ -407,12 +430,17 @@ def pull_meteo_features(
             except Exception:
                 pass
 
-    f_df = pd.DataFrame()
+    # Build date/hour backbone first so the function never returns an empty DataFrame
+    all_dates = pd.date_range(start=start_dt, end=end_dt)
+    all_hours = list(range(1, 25))
+    f_df = pd.MultiIndex.from_product([all_dates, all_hours], names=["dt", "hr"]).to_frame(index=False)
+    f_df["dt"] = pd.to_datetime(f_df["dt"])
+
     for other in [wind, load, solar, outage, maxar_pivot]:
         if other is not None and not other.empty:
-            f_df = (
-                other if f_df.empty else f_df.merge(other, on=["dt", "hr"], how="outer")
-            )
+            other["dt"] = pd.to_datetime(other["dt"])
+            other["hr"] = other["hr"].astype(int)
+            f_df = f_df.merge(other, on=["dt", "hr"], how="left")
 
     if not f_df.empty:
         # Drop any duplicate rows for the same dt and hr from SQL outer joins
@@ -465,7 +493,7 @@ def pull_meteo_features(
             for tok in tokens:
                 if tok == "-":
                     continue
-                col_target, _, _, _ = normalize_var_to_column(tok)
+                col_target, _, _, _ = normalize_var_to_column(tok, available_cols=f_df.columns)
 
                 if col_target and col_target in f_df.columns:
                     evaluated_expr = re.sub(
@@ -500,18 +528,20 @@ def pull_meteo_features(
 
 
 def apply_time_features(df, selected_time_features):
-    dt_series = pd.to_datetime(df["dt"])
-    df["dow_sin"] = np.sin(2 * np.pi * dt_series.dt.dayofweek / 7.0)
-    df["dow_cos"] = np.cos(2 * np.pi * dt_series.dt.dayofweek / 7.0)
-    df["is_weekend"] = dt_series.dt.dayofweek.isin([5, 6]).astype(int)
+    if not selected_time_features:
+        return df
 
-    if selected_time_features and "Hour of Day" in selected_time_features:
+    dt_series = pd.to_datetime(df["dt"])
+
+    if "Hour of Day" in selected_time_features:
         hr_ser = df["hr"].astype(int)
         df["time_hour_sin"] = np.sin(2 * np.pi * hr_ser / 24.0)
         df["time_hour_cos"] = np.cos(2 * np.pi * hr_ser / 24.0)
-    if selected_time_features and "Is On-Peak (HE07-HE22)" in selected_time_features:
+
+    if "Is On-Peak (HE07-HE22)" in selected_time_features:
         is_peak_hr = df["hr"].astype(int).between(7, 22)
         df["time_is_on_peak"] = is_peak_hr.astype(int)
+
     return df
 
 
@@ -867,10 +897,6 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 custom_vars_text=custom_vars_input,
             )
 
-            if train_features.empty:
-                st.error("No weather data found for the selected features and dates.")
-                st.stop()
-
             train_features["dt"] = pd.to_datetime(train_features["dt"])
 
             if excluded_dates:
@@ -905,6 +931,14 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
             y_train = plant_data_full["avg_output_mw"]
 
             features_list = [c for c in X_train.columns if c not in cols_to_drop]
+
+            # Stop execution if zero features are selected anywhere in the sidebar
+            if not features_list:
+                st.error("Please select at least one feature (weather variable, custom formula, or time variable) to run the model.")
+                st.stop()
+
+            X_train_clean = X_train[features_list].copy()
+
             X_train_clean = X_train[features_list].copy()
 
             total_hours = len(plant_data_full)
@@ -1188,18 +1222,22 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
 
             if features_list:
                 custom_dict = parse_custom_functions(custom_vars_input)
+                custom_var_names = set(custom_dict.keys())
 
-                hidden_components = set()
+                # Extract raw formula sub-variables used inside custom expressions
+                formula_raw_subvars = set()
                 for expression in custom_dict.values():
                     found_tokens = re.findall(r"[a-zA-Z0-9_:\-]+", expression)
                     for tok in found_tokens:
-                        if tok == "-":
-                            continue
-                        col_target, _, _, _ = normalize_var_to_column(tok)
-                        if col_target:
-                            hidden_components.add(col_target)
+                        if tok != "-" and not tok.replace(".", "", 1).isdigit() and tok not in ["rolling_average", "mean"]:
+                            col_target, _, _, _ = normalize_var_to_column(tok, available_cols=plant_data_full.columns)
+                            if col_target:
+                                formula_raw_subvars.add(col_target)
+                            else:
+                                formula_raw_subvars.add(tok)
 
-                explicit_columns = set()
+                # Build set of normalized column names explicitly checked in UI multiselects
+                explicitly_selected_features = set()
                 for prefix, selections in [
                     ("wind", selected_wind),
                     ("load", selected_load),
@@ -1210,10 +1248,12 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                         if ":" in item:
                             iso, reg = item.split(":", 1)
                             reg_clean = re.sub(r"\s+", " ", reg.strip())
-                            reg_clean = re.sub(r"[^a-zA-Z0-9_]", "_", reg_clean)
-                            explicit_columns.add(
-                                f"{prefix}_{iso.strip().lower()}_{reg_clean.lower()}"
-                            )
+                            reg_clean = re.sub(r"[^a-zA-Z0-9_]", "_", reg_clean).lower()
+                            iso_clean = iso.strip().lower()
+                            
+                            # Match normalized column names generated by pull_meteo_features
+                            explicitly_selected_features.add(f"{prefix}_{iso_clean}_{reg_clean}")
+                            explicitly_selected_features.add(f"{prefix}_{iso_clean}_prt_{reg_clean}")
 
                 feat_train = plant_data_full[["time"] + features_list].copy()
                 if not fc_features.empty:
@@ -1232,10 +1272,13 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 for feat in features_list:
                     if feat.startswith("time_") or feat.startswith("dow_") or feat in ignored_time_features:
                         continue
-                    
-                    is_maxar_feat = feat.startswith("maxar_") or "feelslike" in feat
-                    
-                    if not is_maxar_feat and (feat in hidden_components and feat not in explicit_columns):
+
+                    # ALWAYS show custom variables (unless they start with an underscore)
+                    if feat in custom_var_names:
+                        if feat.startswith("_"):
+                            continue
+                    # For non-custom variables: hide if it's a raw sub-variable AND wasn't explicitly checked in UI dropdowns
+                    elif feat in formula_raw_subvars and feat not in explicitly_selected_features:
                         continue
 
                     fig.add_trace(
@@ -1269,3 +1312,5 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
 
     except Exception as e:
         st.error(f"Critical Error: {e}")
+        if "Critical Error: A worker process managed by the executor was unexpectedly terminated" in str(e):
+            st.warning("Click the 'Run Analysis' button again")
