@@ -27,9 +27,9 @@ MISO_CUSTOM_CONSTRAINTS = [ 29321,224129,224135,224133,224129,224130,224132,2241
 
 
 def _mysql_config_path():
-    """Path to the MySQL config, kept alongside app.py in config/mysql.yml."""
+    """Path to the MySQL config, kept alongside regression_tool.py in config/mysql.yml."""
     return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "config", "mysql.yml"
+        os.path.dirname(os.path.abspath(__file__)), "../config", "mysql.yml"
     )
 
 
