@@ -86,9 +86,26 @@ person who opens this site can tell what your tool actually does.
 - **New Python packages.** If your tool needs a library that isn't already installed,
   add its name on its own line in `requirements.txt`. The deploy script installs
   everything in that file.
-- **Database access.** Tools read database credentials from `config/mysql.yml`. That file
-  is intentionally kept out of version control, so copy the pattern the Regression Tool
-  uses rather than typing credentials into your script.
+- **Database access.** Never put credentials in your script. The shared `lib/db.py`
+  handles all of it — two lines and you have a connection:
+
+  ```python
+  from lib import db
+
+  if not db.gate():          # shows connection status in the sidebar
+      st.stop()
+  df = pd.read_sql("SELECT ...", db.engine())
+  ```
+
+  On the server the credentials come from `config/mysql.yml` and nobody is prompted for
+  anything. Running locally, `db.gate()` asks for the password once per session — if your
+  local database account has no password, leave the box empty and press **Connect**. Set
+  `TIOS_DB_PASSWORD` in your shell to skip the prompt entirely.
+- **Plant and region lists.** If your tool needs the generator or forecast-region
+  dropdowns, use `from lib.metadata import load_metadata` rather than re-querying — the
+  lists are already loaded and cached for the whole app.
+- **Shared code goes in `lib/`, not `pages/`.** Streamlit turns every file in `pages/`
+  into a page, so a helper module dropped there shows up as a blank entry in the sidebar.
 - **Shared work stays shared.** Anything you save in `st.session_state` is visible to
   every page in your browser session, which is handy for passing a loaded dataset from
   one tool to another.
