@@ -115,7 +115,7 @@ person who opens this site can tell what your tool actually does.
 From the project folder, run:
 
 ```bash
-streamlit run homepage.py
+streamlit run app.py
 ```
 
 That opens the site in your browser using your local copy of the code. Your new page

@@ -16,7 +16,7 @@ import re
 
 # Shared helpers live in lib/ at the repo root. Streamlit puts the entrypoint's
 # directory on sys.path, so this only matters if a page is ever launched
-# directly instead of through homepage.py.
+# directly instead of through app.py.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib import db
