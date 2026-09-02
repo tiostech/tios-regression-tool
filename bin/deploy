@@ -86,7 +86,7 @@ instances.map do |ip|
         .venv/bin/pip install --upgrade pip
         .venv/bin/pip install -r requirements.txt
       fi
-      sudo systemctl restart #{service_name}
+      sudo /usr/bin/systemct lrestart #{service_name}
     REMOTE
 
     puts "==> deploying to #{ip}"
