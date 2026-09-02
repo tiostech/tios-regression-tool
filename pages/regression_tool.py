@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import math
-from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -14,7 +13,14 @@ from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 import sys
 import os
 import re
-import yaml
+
+# Shared helpers live in lib/ at the repo root. Streamlit puts the entrypoint's
+# directory on sys.path, so this only matters if a page is ever launched
+# directly instead of through homepage.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from lib import db
+from lib.metadata import ISOS, VENDOR_CONFIG, load_metadata
 
 # ==============================================================================
 # 🔍 MISO CUSTOM PATH: SHADOW PRICE CONSTRAINTS CONFIG
@@ -24,47 +30,6 @@ import yaml
 # ==============================================================================
 MISO_CUSTOM_CONSTRAINTS = [ 29321,224129,224135,224133,224129,224130,224132,224135,224134,15625]
 # ==============================================================================
-
-
-def _mysql_config_path():
-    """Path to the MySQL config, kept alongside app.py in config/mysql.yml."""
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "config", "mysql.yml"
-    )
-
-
-def load_mysql_config():
-    """
-    Loads the MySQL connection settings from config/mysql.yml.
-
-    Expected structure:
-        mysql_slave:
-          host: 127.0.0.1
-          port: 3309
-          database: tioscore_production
-          username: <user>
-          password: <pass>
-    Returns the mysql_slave dict (empty dict if the file is missing/invalid).
-    """
-    config_path = _mysql_config_path()
-
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                config_data = yaml.safe_load(f) or {}
-            return config_data.get("mysql_slave", {}) or {}
-        except Exception as e:
-            st.sidebar.error(f"Error parsing YAML config: {e}")
-            return {}
-    else:
-        st.sidebar.warning(f"Config file not found at: {config_path}")
-    return {}
-
-
-def load_credentials_from_file():
-    """Returns (username, password) from config/mysql.yml for the sidebar."""
-    creds = load_mysql_config()
-    return creds.get("username", ""), creds.get("password", "")
 
 
 st.set_page_config(
@@ -105,48 +70,8 @@ st.markdown(
 
 st.title("Regression Tool")
 
-ISOS = ["caiso", "ercot", "isone", "miso", "nyiso", "pjm", "spp"]
-
-VENDOR_CONFIG = {
-    "gs": {
-        "meta_table": "miso_gs_plants",
-        "meta_id": "plant_id",
-        "meta_name": "plant_name",
-        "meta_extra": None,
-        "data_table": "miso_gs_plant_hourly_outputs",
-        "data_id": "plant_id",
-        "data_mw": "avg_output_mw",
-    },
-    "lpi": {
-        "meta_table": "miso_lpi_gen_units",
-        "meta_id": "lpi_genunit_id",
-        "meta_name": "name",
-        "meta_extra": None,
-        "data_table": "miso_lpi_gen",
-        "data_id": "lpi_genunit_id",
-        "data_mw": "avg_mw",
-    },
-    "muse": {
-        "meta_table": "miso_muse_plants",
-        "meta_id": "id",
-        "meta_name": "name",
-        "meta_extra": "label",
-        "data_table": "miso_muse_plant_hourly_outputs",
-        "data_id": "plant_id",
-        "data_mw": "avg_output_mw",
-    },
-}
-
-
-def get_engine(uid, pwd):
-    cfg = load_mysql_config()
-    host = cfg.get("host", "127.0.0.1")
-    port = cfg.get("port", 3309)
-    database = cfg.get("database", "tioscore_production")
-    return create_engine(
-        f"mysql+pymysql://{uid}:{pwd}@{host}:{port}/{database}",
-        pool_pre_ping=True,
-    )
+# ISOS and VENDOR_CONFIG now live in lib/metadata.py so other tools can share
+# them; they are imported at the top of this file.
 
 
 def parse_custom_functions(text):
@@ -545,153 +470,21 @@ def apply_time_features(df, selected_time_features):
     return df
 
 
-st.sidebar.header("1. Authentication")
-file_user, file_pass = load_credentials_from_file()
+if not db.gate("1. Database"):
+    st.stop()
 
-db_user = st.sidebar.text_input("Username", value=file_user, key="auth_user")
-db_pass = st.sidebar.text_input(
-    "Password", type="password", value=file_pass, key="auth_pass"
-)
-
-if "plant_options" not in st.session_state:
-    st.session_state.plant_options = {}
-if "dynamic_wind_regions" not in st.session_state:
-    st.session_state.dynamic_wind_regions = []
-if "dynamic_load_regions" not in st.session_state:
-    st.session_state.dynamic_load_regions = []
-if "dynamic_outage_regions" not in st.session_state:
-    st.session_state.dynamic_outage_regions = []
-if "dynamic_solar_regions" not in st.session_state:
-    st.session_state.dynamic_solar_regions = []
-if "dynamic_maxar_locations" not in st.session_state:
-    st.session_state.dynamic_maxar_locations = []
-if "connections_established" not in st.session_state:
-    st.session_state.connections_established = False
 if "show_help" not in st.session_state:
     st.session_state.show_help = False
 
-auto_connect = bool(
-    file_user and file_pass and not st.session_state.connections_established
-)
-
-if st.sidebar.button("Establish Connection", key="conn_btn") or auto_connect:
-    if not db_user or not db_pass:
-        st.sidebar.error("Enter credentials first.")
-    else:
-        try:
-            temp_engine = get_engine(db_user, db_pass)
-            new_options = {v_key: {} for v_key in VENDOR_CONFIG.keys()}
-
-            wind_regs, solar_regs, load_regs, outage_regs, maxar_regs = [], [], [], [], []
-
-            for iso in ISOS:
-                for v_key, cfg in VENDOR_CONFIG.items():
-                    base_meta_table = cfg["meta_table"].replace("miso_", "")
-                    dynamic_meta_table = f"{iso}_{base_meta_table}"
-                    cols = [cfg["meta_id"], cfg["meta_name"]]
-                    if cfg["meta_extra"]:
-                        cols.append(cfg["meta_extra"])
-
-                    try:
-                        query = f"SELECT {', '.join(cols)} FROM {dynamic_meta_table}"
-                        df = pd.read_sql(query, temp_engine)
-                        for _, row in df.iterrows():
-                            if v_key == "muse" and cfg["meta_extra"] in df.columns:
-                                display_name = f"[{iso.upper()}] {row[cfg['meta_name']]} - {row[cfg['meta_extra']]} [{row[cfg['meta_id']]}]"
-                            else:
-                                display_name = f"[{iso.upper()}] {row[cfg['meta_name']]} [{row[cfg['meta_id']]}]"
-
-                            new_options[v_key][display_name] = {
-                                "id": row[cfg["meta_id"]],
-                                "iso": iso,
-                            }
-                    except Exception:
-                        pass
-
-                try:
-                    w_df = pd.read_sql(
-                        f"SELECT DISTINCT region FROM {iso}_meteologica_wind_forecasts",
-                        temp_engine,
-                    )
-                    wind_regs.extend(
-                        [
-                            f"{iso}: {r}"
-                            for r in w_df["region"].tolist()
-                            if r.lower().startswith("meteologica")
-                        ]
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    s_df = pd.read_sql(
-                        f"SELECT DISTINCT region FROM {iso}_meteologica_solar_forecasts",
-                        temp_engine,
-                    )
-                    solar_regs.extend([f"{iso}: {r}" for r in s_df["region"].tolist()])
-                except Exception:
-                    pass
-
-                try:
-                    if iso == "miso":
-                        # 1. Fetch PRT BA load regions
-                        prt_df = pd.read_sql(
-                            "SELECT DISTINCT region_zone AS region FROM miso_prt_loadtemp_forecasts",
-                            temp_engine,
-                        )
-                        load_regs.extend([f"miso: PRT - {r}" for r in prt_df["region"].tolist() if r])
-
-                        # 2. Fetch Meteologica load regions (North, Central, South, ALL, LRZs)
-                        meteo_df = pd.read_sql(
-                            "SELECT DISTINCT region FROM miso_meteologica_load_forecasts",
-                            temp_engine,
-                        )
-                        load_regs.extend([f"miso: {r}" for r in meteo_df["region"].tolist() if r])
-                    else:
-                        l_df = pd.read_sql(
-                            f"SELECT DISTINCT region FROM {iso}_meteologica_load_forecasts",
-                            temp_engine,
-                        )
-                        load_regs.extend([f"{iso}: {r}" for r in l_df["region"].tolist() if r])
-                except Exception:
-                    pass
-
-                try:
-                    o_df = pd.read_sql(
-                        f"SELECT DISTINCT region FROM {iso}_totalgen_on_outages",
-                        temp_engine,
-                    )
-                    outage_regs.extend(
-                        [f"{iso}: {r}" for r in o_df["region"].tolist() if r]
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    m_df = pd.read_sql(f"SELECT id, name FROM {iso}_locations WHERE is_maxar = 1", temp_engine)
-                    for _, row in m_df.iterrows():
-                        maxar_regs.extend([f"[{iso.upper()}] {row['name']} ({int(row['id'])})"])
-                except Exception:
-                    try:
-                        m_df = pd.read_sql(f"SELECT DISTINCT location_id FROM {iso}_maxar_weather_histories", temp_engine)
-                        for loc in m_df["location_id"].tolist():
-                            maxar_regs.extend([f"[{iso.upper()}] Location {int(loc)} ({int(loc)})"])
-                    except Exception:
-                        pass
-
-            st.session_state.plant_options = new_options
-            st.session_state.dynamic_wind_regions = sorted(wind_regs)
-            st.session_state.dynamic_solar_regions = sorted(solar_regs)
-            st.session_state.dynamic_load_regions = sorted(load_regs)
-            st.session_state.dynamic_outage_regions = sorted(outage_regs)
-            st.session_state.dynamic_maxar_locations = sorted(maxar_regs)
-            st.session_state.connections_established = True
-            st.sidebar.success("Successful connection")
-
-            if auto_connect:
-                st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Connection Failed: {e}")
+# Plant and region dropdown options, cached app-wide by lib/metadata.py.
+try:
+    META = load_metadata()
+except db.ConfigError as e:
+    st.sidebar.error(str(e))
+    st.stop()
+except Exception as e:
+    st.error(f"Could not load plant and region lists: {e}")
+    st.stop()
 
 st.sidebar.header("2. Plant Selection")
 vendor_choice = st.sidebar.selectbox(
@@ -700,7 +493,7 @@ vendor_choice = st.sidebar.selectbox(
     format_func=lambda x: x.upper(),
     key="v_sel",
 )
-current_vendor_options = st.session_state.plant_options.get(vendor_choice, {})
+current_vendor_options = META["plants"].get(vendor_choice, {})
 
 gen_id = None
 target_iso = None
@@ -733,28 +526,28 @@ tune_model = True
 st.sidebar.header("4. Feature Selection")
 selected_wind = st.sidebar.multiselect(
     "Wind Variables (ISO: Region)",
-    options=st.session_state.dynamic_wind_regions,
+    options=META["wind"],
     default=[],
 )
 selected_load = st.sidebar.multiselect(
     "Load Variables (ISO: Region)",
-    options=st.session_state.dynamic_load_regions,
+    options=META["load"],
     default=[],
 )
 selected_solar = st.sidebar.multiselect(
     "Solar Variables (ISO: Region)",
-    options=st.session_state.dynamic_solar_regions,
+    options=META["solar"],
     default=[],
 )
 selected_outage = st.sidebar.multiselect(
     "Gen on Outage (ISO: Region)",
-    options=st.session_state.dynamic_outage_regions,
+    options=META["outage"],
     default=[],
 )
 
 selected_maxar = st.sidebar.multiselect(
     "Maxar Feelslike (City / Location)",
-    options=st.session_state.dynamic_maxar_locations,
+    options=META["maxar"],
     default=[],
 )
 
@@ -828,12 +621,12 @@ fc_date = st.sidebar.date_input(
 )
 
 if st.sidebar.button("Run Analysis", key="r_btn"):
-    if not all([db_user, db_pass, gen_id, target_iso, train_start, train_end, fc_date]):
+    if not all([gen_id, target_iso, train_start, train_end, fc_date]):
         st.error("❌ Missing required inputs or ISO metadata context.")
         st.stop()
 
     try:
-        engine = get_engine(db_user, db_pass)
+        engine = db.engine()
         cfg = VENDOR_CONFIG[vendor_choice]
 
         base_data_table = cfg["data_table"].replace("miso_", "")
