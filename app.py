@@ -39,7 +39,7 @@ forecast you can eyeball or export.
 drive a plant, and getting a quick second opinion on a forecast.
 """
 )
-st.info("Open it from **regression tool** in the sidebar on the left.", icon="📈")
+st.page_link("pages/regression_tool.py", label="Open the Regression Tool", icon="📈")
 
 st.divider()
 
@@ -69,15 +69,14 @@ st.title("Spark Spread Tool")
 ```
 
 **3. Add it to this homepage.** Copy the Regression Tool block above, change the
-heading, and rewrite the description.
+heading, rewrite the description, and point the link at your new file:
+
+```python
+st.page_link("pages/spark_spread_tool.py", label="Open the Spark Spread Tool", icon="⚡")
+```
 
 That last step is optional — the sidebar link appears either way — but it means the next
 person who opens this site can tell what your tool actually does.
-
-Do **not** use `st.page_link()` to link to your page. It crashes with
-`KeyError: 'url_pathname'` in apps that use the `pages/` folder, because Streamlit only
-fills that field in for the newer `st.navigation()` routing API. Describe the tool and
-let the sidebar do the linking.
 
 ### A few things worth knowing
 
