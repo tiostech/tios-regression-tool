@@ -74,7 +74,7 @@ puts "deploy started..."
 
 instances = output.split
 
-instances.map do |ip|
+results = instances.map do |ip|
   Thread.new do
     remote = <<~REMOTE
       set -e
@@ -86,12 +86,23 @@ instances.map do |ip|
         .venv/bin/pip install --upgrade pip
         .venv/bin/pip install -r requirements.txt
       fi
-      sudo /usr/bin/systemct lrestart #{service_name}
+      sudo systemctl restart #{service_name}
     REMOTE
 
     puts "==> deploying to #{ip}"
-    system("ssh", "-o", "StrictHostKeyChecking=no", "tiostech@#{ip}", "bash -l -c #{remote.shellescape}")
+    ok = system("ssh", "-o", "StrictHostKeyChecking=no", "tiostech@#{ip}", "bash -l -c #{remote.shellescape}")
+    puts "==> FAILED on #{ip} (see errors above)" unless ok
+    [ip, ok]
   end
-end.each(&:join)
+end.map(&:value)
+
+failed = results.reject { |_ip, ok| ok }.map(&:first)
+
+unless failed.empty?
+  puts ""
+  puts "ERROR: deploy FAILED on #{failed.size} of #{instances.size} instance(s): #{failed.join(', ')}"
+  puts "The app on those instances may still be running the old code -- fix and re-run."
+  exit(-1)
+end
 
 puts "Deployment finished..."
