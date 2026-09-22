@@ -6,11 +6,8 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from lib import db
 
-
-
 st.set_page_config(page_title="Market Outage Search", layout="wide")
 st.title("⚡ Power Market Outage & Shadow Price Search")
-
 
 if not db.gate("1. Database"):
     st.stop()
@@ -661,6 +658,7 @@ elif lookback_option == "1 Year":
     start_date = now - pd.DateOffset(years=1)
 elif lookback_option == "3 Years":
     start_date = now - pd.DateOffset(years=3)
+
 # --- BUILD SEARCH FIELDS ---
 
 search_fields = []
@@ -980,7 +978,7 @@ if st.sidebar.button("Run Search", type="primary"):
                         for ctx in ['rt_shadow', 'rt_shadow_forecast', 'da_shadow']:
                             ctx_df = g['group_df'][g['group_df']['context'] == ctx]
                             if not ctx_df.empty:
-                                for _, row in ctx_df.iterrows():
+                                for row in ctx_df.to_dict('records'):
                                     sent = extract_matching_sentence(row['body'], search_fields)
                                     if sent:
                                         selected_row = row
@@ -1165,4 +1163,3 @@ if st.sidebar.button("Run Search", type="primary"):
 
             except Exception as e:
                 st.error(f"Error executing query: {e}")
-
