@@ -6,11 +6,8 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from lib import db
 
-
-
 st.set_page_config(page_title="Market Outage Search", layout="wide")
 st.title("⚡ Power Market Outage & Shadow Price Search")
-
 
 if not db.gate("1. Database"):
     st.stop()
@@ -661,6 +658,7 @@ elif lookback_option == "1 Year":
     start_date = now - pd.DateOffset(years=1)
 elif lookback_option == "3 Years":
     start_date = now - pd.DateOffset(years=3)
+
 # --- BUILD SEARCH FIELDS ---
 
 search_fields = []
@@ -970,37 +968,46 @@ if st.sidebar.button("Run Search", type="primary"):
                     matched_me_ids = [g['me_id'] for g in me_groups if g['me_id']]
                     meta_descriptions = fetch_monelem_meta_descriptions(current_market, tuple(matched_me_ids))
 
-                    # --- SIDEBAR: CONSOLIDATED COPY ALL LATEST RT SHADOW NOTES ---
-                    all_rt_snippets = []
+                    # --- SIDEBAR: CONSOLIDATED COPY LATEST SHADOW NOTES (RT -> FC -> DA) ---
+                    all_snippets = []
                     for g in me_groups:
-                        rt_shadow_df = g['group_df'][g['group_df']['context'] == 'rt_shadow']
-                        if not rt_shadow_df.empty:
-                            latest_row = rt_shadow_df.iloc[0]
-                            raw_body = latest_row['body']
-                            note_dt = latest_row['dt']
+                        selected_row = None
+                        matching_sentence = None
 
-                            matching_sentence = extract_matching_sentence(raw_body, search_fields)
+                        # Priority fallback: RT ('rt_shadow') -> FC ('rt_shadow_forecast') -> DA ('da_shadow')
+                        for ctx in ['rt_shadow', 'rt_shadow_forecast', 'da_shadow']:
+                            ctx_df = g['group_df'][g['group_df']['context'] == ctx]
+                            if not ctx_df.empty:
+                                for row in ctx_df.to_dict('records'):
+                                    sent = extract_matching_sentence(row['body'], search_fields)
+                                    if sent:
+                                        selected_row = row
+                                        matching_sentence = sent
+                                        break
+                                if selected_row is not None:
+                                    break
 
-                            if matching_sentence:
-                                me_id = str(g['me_id'])
-                                me_name = str(g['me_name'])
-                                me_url = f"https://energycore.tioscapital.com/{current_market.lower()}/monitored_elements/{me_id}"
-                                header_label = f"{current_market.upper()} ME {me_id} {me_name}"
-                                markdown_link = f"[{header_label}]({me_url})"
+                        if selected_row is not None and matching_sentence:
+                            me_id = str(g['me_id'])
+                            me_name = str(g['me_name'])
+                            me_url = f"https://energycore.tioscapital.com/{current_market.lower()}/monitored_elements/{me_id}"
+                            header_label = f"{current_market.upper()} ME {me_id} {me_name}"
+                            markdown_link = f"[{header_label}]({me_url})"
 
-                                date_str = pd.to_datetime(note_dt).strftime("%Y-%m-%d") if pd.notna(note_dt) else ""
+                            note_dt = selected_row['dt']
+                            date_str = pd.to_datetime(note_dt).strftime("%Y-%m-%d") if pd.notna(note_dt) else ""
 
-                                snippet_line = f"*({date_str})* | **{markdown_link}**: {matching_sentence}"
-                                all_rt_snippets.append(snippet_line)
+                            snippet_line = f"*({date_str})* | **{markdown_link}**: {matching_sentence}"
+                            all_snippets.append(snippet_line)
 
                     with st.sidebar:
                         st.markdown("---")
-                        st.subheader("📋 RT Shadow Snippets")
-                        if all_rt_snippets:
-                            st.caption("Click top-right icon below to copy matching RT notes:")
-                            st.code("\n\n".join(all_rt_snippets), language="markdown")
+                        st.subheader("📋 Shadow Snippets")
+                        if all_snippets:
+                            st.caption("Click top-right icon below to copy matching notes (RT / FC / DA):")
+                            st.code("\n\n".join(all_snippets), language="markdown")
                         else:
-                            st.info("No matching RT Shadow notes found.")
+                            st.info("No matching Shadow notes found.")
 
                     # --- MAIN PANEL DATA TABS ---
                     tab_titles = [f"ME {g['me_id']} - {g['me_name'][:30]}..." if len(
@@ -1156,4 +1163,3 @@ if st.sidebar.button("Run Search", type="primary"):
 
             except Exception as e:
                 st.error(f"Error executing query: {e}")
-
