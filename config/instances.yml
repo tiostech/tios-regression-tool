@@ -5,6 +5,8 @@
 # ec2_rootname   : the EC2 tag:Name prefix / Salt primary_name (matches the
 #                  tiosaws launcher's self.primary_name -> 'regressiontool')
 # service_name   : the systemd service that runs the Streamlit app on the box
+# deploy_dir     : where the app is checked out on the box
 elb_rootname: regression-tool
 ec2_rootname: regressiontool
 service_name: regression-tool
+deploy_dir: /ebsmount/www/tios-regression-tool

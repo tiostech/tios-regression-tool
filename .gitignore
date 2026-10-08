@@ -2,5 +2,6 @@
 # and copied from config/mysql.yml.sample for local dev. Never commit real creds.
 config/mysql.yml
 .venv
-.idea__pycache__/
+.idea
+__pycache__/
 *.pyc
