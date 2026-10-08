@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -e
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+echo "=== Setting up tios-regression-tool ==="
+
+# 1. Determine Python executable
+PYTHON_CMD=""
+if command -v python3.10 >/dev/null 2>&1; then
+  PYTHON_CMD="python3.10"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_CMD="python3"
+else
+  echo "Error: Python 3 is required but not installed." >&2
+  exit 1
+fi
+
+echo "Using Python: $($PYTHON_CMD --version)"
+
+# 2. Virtual environment (.venv)
+if [ ! -d ".venv" ]; then
+  echo "Creating virtual environment in .venv..."
+  "$PYTHON_CMD" -m venv .venv
+else
+  echo "Virtual environment .venv already exists."
+fi
+
+# 3. Install / upgrade dependencies
+echo "Installing dependencies from requirements.txt..."
+.venv/bin/pip install --quiet --upgrade pip
+.venv/bin/pip install --quiet -r requirements.txt
+
+# 4. MySQL Config
+if [ ! -f "config/mysql.yml" ]; then
+  echo "Creating config/mysql.yml from template..."
+  cp config/mysql.yml.sample config/mysql.yml
+  echo "--> Action needed: Open config/mysql.yml and set your username and password."
+else
+  echo "config/mysql.yml already exists."
+fi
+
+# 5. Check SSH tunnel on 127.0.0.1:3309
+echo "Checking database tunnel on port 3309..."
+if nc -z 127.0.0.1 3309 2>/dev/null; then
+  echo "✔ Database tunnel is open on 127.0.0.1:3309."
+else
+  echo "⚠ Database tunnel not detected on 127.0.0.1:3309."
+  echo "  Remember to start your SSH tunnel before running queries or the MCP server."
+fi
+
+# 6. Verify MCP server startup
+echo "Verifying MCP server configuration..."
+.venv/bin/python -c "import mcp_server; print('✔ MCP server module loads successfully.')"
+
+echo ""
+echo "=== Setup complete! ==="
+echo "You can now run:"
+echo "  • Streamlit Web App:   source .venv/bin/activate && streamlit run app.py"
+echo "  • Claude Code:         claude   (auto-discovers .mcp.json)"
+echo "  • Antigravity / agy:   agy      (auto-discovers .agents/plugins/energycore-outages)"

@@ -127,6 +127,59 @@ wrong.
 
 st.divider()
 
+st.header("AI Tools (MCP)")
+
+st.markdown(
+    """
+The **Outage & Shadow Price Search** is also available to AI assistants that run on your
+laptop, such as **Claude Code** and **Gemini CLI**. The assistant can list the outages
+planned for a day, pull the same "Copy Full Output to Clipboard" text you would copy from
+the page, and write the outage briefing — without you pasting anything.
+
+This uses the *Model Context Protocol* (MCP): `mcp_server.py` is a small program the
+assistant starts in the background. It only reads from the database, and the AI usage
+counts against your assistant subscription, not a separate API bill.
+
+### What it gives the assistant
+
+| Name | What it does |
+| --- | --- |
+| `list_upcoming_outages` | Outages planned to start on a day (T+2 by default), one row per equipment ID, with counts of note matches, annotations, and flags. Uses the same ignore rules as EnergyCore (`regression_ignore_rules`), so cancelled, denied, hot-line work, etc. are left out. |
+| `get_outage_documentation` | For one outage, the same text as **Copy Full Output to Clipboard** on the search page. |
+| `outage_briefing` (prompt) | The instructions for writing the briefing. They live in `prompts/outage_briefing.md` — edit that file to change what the report looks like. |
+
+### Setup (once)
+
+1. Run the setup script to create the `.venv`, install packages, and initialize config:
+   ```bash
+   ./bin/setup
+   ```
+2. Put your password **in `config/mysql.yml`** (or set `TIOS_DB_PASSWORD`). There is no
+   sidebar for the assistant to prompt you in.
+3. Make sure your database tunnel is open, the same as for the app (`./bin/setup` checks this).
+
+**Claude Code:** start `claude` in this folder. Claude automatically detects `.mcp.json`
+and asks once whether to enable `energycore-outages` — say yes.
+
+**Antigravity / Gemini CLI:** start `agy` in this folder. Antigravity automatically
+discovers `.agents/plugins/energycore-outages` — no manual configuration needed.
+
+### Using it
+
+Ask in plain words, for example *"Write the outage briefing for MISO outages starting
+T+2"*, or run the prompt directly. In Claude Code, type
+`/mcp__energycore-outages__outage_briefing` and give the market.
+
+The first request for each market takes about a minute while it loads that market's
+notes. Requests after that are quick.
+
+**Always check the briefing against the search page before you trade on it.** The
+assistant can misread the notes.
+"""
+)
+
+st.divider()
+
 st.header("Adding a New Tool to This Site")
 
 st.markdown(

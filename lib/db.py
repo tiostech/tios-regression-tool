@@ -118,6 +118,18 @@ def password_source():
     which is normal for a local dev MySQL. Only ``None`` means "nothing supplied
     yet", so callers must test ``password is None``, not ``not password``.
     """
+    password, source = _config_or_env_password()
+    if password is not None:
+        return password, source
+
+    if st.session_state.get(_SUBMITTED_KEY):
+        return st.session_state.get(_PASSWORD_KEY) or "", "session"
+
+    return None, None
+
+
+def _config_or_env_password():
+    """Steps 1 and 2 of the password resolution order: (password, source) or (None, None)."""
     try:
         cfg = load_mysql_config()
     except ConfigError:
@@ -132,21 +144,10 @@ def password_source():
     if from_env is not None:
         return from_env, "env"
 
-    if st.session_state.get(_SUBMITTED_KEY):
-        return st.session_state.get(_PASSWORD_KEY) or "", "session"
-
     return None, None
 
 
-@st.cache_resource(show_spinner=False)
-def _engine(username, password, host, port, database):
-    """
-    The actual engine, cached on the full credential set.
-
-    ``cache_resource`` means one engine -- and one connection pool -- per set of
-    credentials for the whole app process, shared across pages, tabs, and users.
-    Building an engine per button click throws the pool away each time.
-    """
+def _make_engine(username, password, host, port, database):
     url = URL.create(
         "mysql+pymysql",
         username=username,
@@ -158,6 +159,18 @@ def _engine(username, password, host, port, database):
 
     # URL.create escapes the password, so passwords containing @ : / # ? work.
     return create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+
+
+@st.cache_resource(show_spinner=False)
+def _engine(username, password, host, port, database):
+    """
+    The actual engine, cached on the full credential set.
+
+    ``cache_resource`` means one engine -- and one connection pool -- per set of
+    credentials for the whole app process, shared across pages, tabs, and users.
+    Building an engine per button click throws the pool away each time.
+    """
+    return _make_engine(username, password, host, port, database)
 
 
 def engine():
@@ -179,6 +192,27 @@ def engine():
         )
 
     return _engine(username, password, host, port, database)
+
+
+def standalone_engine():
+    """
+    An engine for code that runs outside Streamlit, such as mcp_server.py.
+
+    Same config/mysql.yml settings as ``engine()``, but there is no sidebar to
+    prompt in, so the password must come from the config file or the
+    TIOS_DB_PASSWORD environment variable. The caller should keep the engine
+    rather than call this repeatedly.
+    """
+    username, host, port, database = settings()
+    password, _ = _config_or_env_password()
+
+    if password is None:
+        raise ConfigError(
+            f"No database password available. Set mysql_slave.password in "
+            f"{config_path()} or export {PASSWORD_ENV_VAR}."
+        )
+
+    return _make_engine(username, password, host, port, database)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
