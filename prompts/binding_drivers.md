@@ -10,7 +10,7 @@ comment is not sent to the AI.
 -->
 <Steps>
 
-Explain why the highest {{MARKET}} constraints bound on {{date}}.
+Explain why the highest {{MARKET}} constraints bound on {{date}}. Use complete days: by default this is two days ago.
 
 1. Call `list_binding_constraints` with market `{{market}}`, date `{{date}}`, kind `rt`. Call it again with kind `da` to see day-ahead.
 2. Pick the constraints that stand out: the largest totals, and any whose total or peak is large compared with their own history (`total_30d`, `max_day`), or that rarely bind (`days_bound`).
@@ -26,6 +26,7 @@ Use only the data that the tools return. If the data does not support a conclusi
 - **Generator impacts.** `load_mw` is the flow a plant's output change added to the constraint between the two hours: positive loads it, negative relieves it. A negative shift factor (`sf`) means more output from that plant loads the constraint.
 - **Redispatch.** Once a constraint binds, the market moves generators to relieve it. Rows marked `possible_redispatch` (gas, coal, or oil moving in the relieving direction while binding) are probably a response to the constraint, not a cause. Do not cite them as relief that explains the price. Nuclear, solar, wind, hydro, and scheduled pumped storage do not respond this way, so their moves are causes.
 - **Base hour.** Changes are measured from `base_hr`, ideally before binding started. If the constraint bound from HE1, say that the baseline is already a binding hour.
+- **Market conditions.** RTEP is our real-time energy price forecast and the stress index is our lion stress index (reserve margin, Eastern Interconnect net load, temperature, gas, solar ramps); both are shown as they stood at the day-ahead deadline. Compare them with the binding hours: high stress or RT prices well above RTEP point to system-wide tightness rather than a local cause, and that is what the desk's notes mean by elevated "stress" and "RTEP sensitivity".
 - **Autoflow.** The flow (MW) that zonal wind, solar, and load put on the constraint; + loads it. Compare its hourly shape with the shadow prices: if autoflow rises with congestion, regional conditions explain it (name the zones that moved most). If autoflow is flat while the price spikes, the cause is local (a plant, an outage) or not in the zonal data. The default source is pseudo actuals (latest forecast per hour, close to what happened); call `get_autoflow` with source `forecast` to see what the day-ahead market expected. If the coefficients come from another constraint ID, say so.
 - **Generator sources.** Plant output comes from several vendors (`sources`). Where they disagree (`disagreement`), say which number you relied on; a single vendor's flat or zero values are often bad data.
 - **Transmission outage impacts.** From EnergyCore's network model, including the constraint's contingency. `individual_pct` is the outage alone (like the desk's FIDi); `in_combination_pct` is what it adds on top of the other outages (closer to FIDn). Rows marked `check` usually mean the outages together split the model; do not rely on their in-combination number. The model is a fixed snapshot, so use these for which outages matter and roughly how much, not for exact flows. For MISO it includes mapped SPP and PJM outages. Outages only in the outage report and not in the active table may not actually be out.

@@ -20,6 +20,7 @@ from mcp.types import ToolAnnotations
 from lib import autoflow
 from lib import constraint_drivers as drivers
 from lib import db
+from lib import market_conditions
 from lib import network
 from lib import outage_impacts
 from lib import outage_search as osearch
@@ -36,6 +37,10 @@ NOTE_RESULT_LIMIT = 2000
 
 ID_TYPES = {"equipment": "Equipment ID", "group": "Group ID", "text": "Manual string"}
 
+# The binding-constraint tools look back at days with complete data by default: final RT
+# prices, full 5-minute intervals, settled outage records, and pseudo actuals for every hour.
+ANALYSIS_DAYS_AHEAD = -2
+
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True,
                             open_world_hint=False)
 
@@ -47,7 +52,9 @@ server = MCPServer(
         "get_outage_documentation for the outages that have history. The outage_briefing prompt "
         "holds the desk's report instructions. To explain why constraints bound on a day, use "
         "list_binding_constraints, then get_constraint_drivers for the constraints of interest; the "
-        "binding_drivers prompt holds the instructions. get_autoflow gives autoflow over a date range, and "
+        "binding_drivers prompt holds the instructions. These analysis tools default to two days ago, the latest day "
+        "with complete data. get_market_conditions gives energy prices, RTEP, and the stress index; "
+        "get_autoflow gives autoflow over a date range, and "
         "get_outage_impacts checks outages (including planned ones on future days) against a constraint."
     ),
 )
@@ -231,7 +238,8 @@ def _tsv(df: pd.DataFrame, columns: list[str], decimals: int = 0) -> list[str]:
         if isinstance(v, float):
             return f"{v:.{decimals}f}"
         return " ".join(str(v).split())
-    return ["\t".join(columns)] + ["\t".join(cell(r[c]) for c in columns) for _, r in df.iterrows()]
+    rows = df[columns].astype(object).itertuples(index=False, name=None)
+    return ["\t".join(columns)] + ["\t".join(cell(v) for v in row) for row in rows]
 
 
 @server.tool(annotations=READ_ONLY)
@@ -241,7 +249,7 @@ def list_binding_constraints(market: str, date: str | None = None, kind: str = "
 
     Args:
         market: miso, spp, pjm, ercot, or caiso.
-        date: The day, YYYY-MM-DD. Default: today.
+        date: The day, YYYY-MM-DD. Default: two days ago, the latest day with complete data.
         kind: rt (real-time) or da (day-ahead). Today's RT is usually preliminary and only
             runs through the latest published hour.
         limit: Most constraints to list.
@@ -251,7 +259,7 @@ def list_binding_constraints(market: str, date: str | None = None, kind: str = "
     """
     _check_choice("market", market, osearch.MARKETS)
     _check_choice("kind", kind, drivers.KINDS)
-    day = _resolve_date(date, 0)
+    day = _resolve_date(date, ANALYSIS_DAYS_AHEAD)
     eng = engine()
 
     df = drivers.binding_constraints(eng, market, day, kind, limit)
@@ -266,6 +274,63 @@ def list_binding_constraints(market: str, date: str | None = None, kind: str = "
     lines += _tsv(df, ["constraint_id", "me_id", "name", "total", "hours", "first_hr", "last_hr", "peak_hr", "peak",
                        "total_30d", "days_bound", "max_day", "last_bound"])
     return "\n".join(lines)
+
+
+def _market_conditions_section(eng, market: str, day: datetime.date, shadow: pd.DataFrame | None,
+                               warnings: list[str], forecast_names: dict[str, str] | None = None) -> list[str]:
+    """Energy prices, RTEP/DAEP, and the stress index by hour, next to the shadow prices."""
+    used, table = market_conditions.market_conditions(eng, market, day, names=forecast_names, warn=warnings.append)
+    lines = ["", "--- Market conditions: energy prices, our forecasts (as of the day-ahead deadline), stress index ---"]
+    if table.empty:
+        return lines + ["No data."]
+    if used:
+        lines.append("Sources: " + "; ".join(f"{k} = {v['name']} ({v['source']})" for k, v in used.items()) + ".")
+    if shadow is not None and not shadow.empty:
+        table = table.merge(shadow, on="hr", how="left")
+        binding = table["shadow_price"].fillna(0) != 0
+        summary = []
+        for col in ("rt_energy_price", "rtep", "rt_minus_rtep", "stress_level"):
+            if col in table and binding.any() and (~binding).any():
+                summary.append(f"{col} {table.loc[binding, col].mean():.1f} while binding vs "
+                               f"{table.loc[~binding, col].mean():.1f} otherwise")
+        if summary:
+            lines.append("Averages: " + "; ".join(summary) + ".")
+    extra = [c for c in (forecast_names or {}) if c not in ("rtep", "daep", "flex_daep")]
+    cols = [c for c in ["hr", "da_energy_price", "rt_energy_price", "rtep", "rt_minus_rtep", "daep", "flex_daep"]
+            + extra + ["stress_level"] if c in table.columns]
+    cols += [c for c in table.columns if ("reserve_margin" in c or "net_load" in c) and c not in cols]
+    if "shadow_price" in table.columns:
+        cols.append("shadow_price")
+    lines += _tsv(table, cols, decimals=1)
+    return lines
+
+
+@server.tool(annotations=READ_ONLY)
+def get_market_conditions(market: str, date: str | None = None, forecasts: str | None = None) -> str:
+    """Hourly market-wide conditions for a day: actual DA and RT system energy prices, our
+    energy price forecasts (RTEP, DAEP) as they stood at the day-ahead deadline, RT minus
+    RTEP, and the stress index with its reserve margin and net load inputs.
+
+    Forecast names change as models are updated, so by default they are read from the
+    trading configs in effect on the day (tios_configs), and the stress index file from the
+    stress-index config in effect; the output says which names were used.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        date: The day, YYYY-MM-DD. Default: two days ago, the latest day with complete data.
+        forecasts: Optional comma-separated column=forecast_name pairs to show instead, e.g.
+            "rtep=tios.rtep.expsm, upper=tios.rtep.samprf.pm.20241023#upper_80".
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    day = _resolve_date(date, ANALYSIS_DAYS_AHEAD)
+    warnings = []
+    names = None
+    if forecasts:
+        names = dict(p.split("=", 1) for p in (x.strip() for x in forecasts.split(",")) if "=" in p)
+        names = {k.strip(): v.strip() for k, v in names.items()}
+    lines = [f"=== {market.upper()} market conditions on {day} ==="]
+    lines += _market_conditions_section(engine(), market, day, None, warnings, forecast_names=names)[1:]
+    return "\n".join(lines + _warnings_section(warnings))
 
 
 def _autoflow_header(meta: dict) -> str:
@@ -314,7 +379,7 @@ def get_autoflow(market: str, constraint_id: int, start_date: str | None = None,
         market: miso, spp, pjm, ercot, or caiso.
         constraint_id: Official constraint ID. If it has no zonal coefficients (EnergyCore only
             computes them for its autoflow_constraints list), another ID with the same name is used.
-        start_date: First market day, YYYY-MM-DD. Default: today.
+        start_date: First market day, YYYY-MM-DD. Default: two days ago.
         end_date: Last market day. Default: start_date.
         source: pseudo_actuals (latest forecast for each hour, from EnergyCore's S3 cache) or
             forecast (the day-ahead forecast in MySQL).
@@ -327,7 +392,7 @@ def get_autoflow(market: str, constraint_id: int, start_date: str | None = None,
     """
     _check_choice("market", market, osearch.MARKETS)
     _check_choice("source", source, autoflow.SOURCES)
-    start = _resolve_date(start_date, 0)
+    start = _resolve_date(start_date, ANALYSIS_DAYS_AHEAD)
     end = datetime.date.fromisoformat(end_date) if end_date else start
     types = tuple(t.strip() for t in coefficient_types.split(",") if t.strip())
     warnings = []
@@ -488,13 +553,13 @@ def get_outage_impacts(market: str, constraint_id: int, date: str | None = None,
     Args:
         market: miso, spp, pjm, ercot, or caiso. MISO also includes mapped SPP and PJM outages.
         constraint_id: Official constraint ID.
-        date: The day, YYYY-MM-DD. Default: today.
+        date: The day, YYYY-MM-DD. Default: two days ago, the latest day with complete data.
         start_hr: First hour ending of the period to collect outages for.
         end_hr: Last hour ending of the period.
         top: Most outages to list.
     """
     _check_choice("market", market, osearch.MARKETS)
-    day = _resolve_date(date, 0)
+    day = _resolve_date(date, ANALYSIS_DAYS_AHEAD)
     warnings = []
     eng = engine()
     start = datetime.datetime.combine(day, datetime.time()) + datetime.timedelta(hours=start_hr - 1)
@@ -540,7 +605,7 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
     Args:
         market: miso, spp, pjm, ercot, or caiso.
         constraint_id: From list_binding_constraints.
-        date: The day, YYYY-MM-DD. Default: today.
+        date: The day, YYYY-MM-DD. Default: two days ago, the latest day with complete data.
         kind: rt or da, matching where constraint_id came from.
         base_hr: Hour ending to measure changes from. Default: the latest hour before the
             peak with the lowest shadow price, ideally before binding started.
@@ -561,7 +626,7 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
     _check_choice("kind", kind, drivers.KINDS)
     _check_choice("source", source, drivers.GENERATOR_SOURCES)
     _check_choice("autoflow_source", autoflow_source, autoflow.SOURCES + ("none",))
-    day = _resolve_date(date, 0)
+    day = _resolve_date(date, ANALYSIS_DAYS_AHEAD)
     eng = engine()
     warnings = []
 
@@ -578,6 +643,7 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
              "", "--- Hourly shadow prices ---"]
     lines += _tsv(hourly, ["hr", "shadow_price"])
     lines.append(f"Total {hourly['shadow_price'].sum():.0f} over {len(hourly)} hours.")
+    lines += _market_conditions_section(eng, market, day, hourly, warnings)
 
     if base_hr is None:
         warnings.append(f"The peak is HE{compare_hr}, so there is no earlier hour to compare with. "
@@ -652,7 +718,7 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
 def binding_drivers(market: str, date: str = "") -> str:
     """Explain why the day's highest constraints bound, in the style of the desk's notes."""
     _check_choice("market", market, osearch.MARKETS)
-    day = date or _resolve_date(None, 0).isoformat()
+    day = date or _resolve_date(None, ANALYSIS_DAYS_AHEAD).isoformat()
 
     with open(DRIVERS_PROMPT_PATH, "r") as f:
         template = f.read()

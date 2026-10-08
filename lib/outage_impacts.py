@@ -30,7 +30,7 @@ from lib import upcoming_outages
 
 MIN_SCREEN_MW = 1.0
 # Outage equipment names for devices that switch or compensate rather than carry flow.
-NON_BRANCH_DEVICE = re.compile(r"\b(CAP\d*|CB|GCB|OCB|BRK|BRKR|BKR|DIS|DISC|SW|SWITCH|REAC|REACTOR|SC\d*|LOAD|LD)\b",
+NON_BRANCH_DEVICE = re.compile(r"\b(?:CAP\d*|CB|GCB|OCB|BRK|BRKR|BKR|DIS|DISC|SW|SWITCH|REAC|REACTOR|SC\d*|LOAD|LD)\b",
                                re.IGNORECASE)
 # Unmapped outages below this voltage are not shown as timing matches.
 MIN_UNMAPPED_TIMING_KV = 100.0
