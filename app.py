@@ -147,6 +147,11 @@ counts against your assistant subscription, not a separate API bill.
 | `list_upcoming_outages` | Outages planned to start on a day (T+2 by default), one row per equipment ID, with counts of note matches, annotations, and flags. Uses the same ignore rules as EnergyCore (`regression_ignore_rules`), so cancelled, denied, hot-line work, etc. are left out. |
 | `get_outage_documentation` | For one outage, the same text as **Copy Full Output to Clipboard** on the search page. |
 | `outage_briefing` (prompt) | The instructions for writing the briefing. They live in `prompts/outage_briefing.md` — edit that file to change what the report looks like. |
+| `list_binding_constraints` | Constraints that bound on a day (RT or DA), largest first, with each one's 30-day and 3-year binding history. |
+| `get_constraint_drivers` | For one binding constraint: hourly shadow prices, how much each generator's output change loaded or relieved it (shift factors × plant output), zonal load, tie flows, autoflow, transmission outage impacts from the network model with their timing against 5-minute prices, EnergyCore's outage matching and the desk's outage notes, generator outages, and recent desk notes. Plant output is combined across Muse, Genscape, Meteologica, and LPI, with disagreements listed. Flags gas/coal/oil moves that are probably the market redispatching around the constraint. |
+| `get_outage_impacts` | How much each transmission outage in effect on a day loads one constraint, from EnergyCore's network model (including the contingency, and SPP/PJM outages for MISO). Works for future days, using planned outages. |
+| `get_autoflow` | Hourly autoflow on a constraint over a date range — the flow zonal wind, solar, and load put on it — computed like EnergyCore's Autoflow analysis, from pseudo actuals (EnergyCore's S3 cache; needs AWS credentials) or day-ahead forecasts. |
+| `binding_drivers` (prompt) | Instructions for explaining why the day's highest constraints bound. They live in `prompts/binding_drivers.md`. |
 
 ### Setup (once)
 

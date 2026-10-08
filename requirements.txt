@@ -11,3 +11,4 @@ cryptography
 pyyaml
 statsmodels
 pymysql
+pyarrow
