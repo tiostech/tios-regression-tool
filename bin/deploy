@@ -50,8 +50,9 @@ end
 specs        = YAML.load(File.open(yaml_path, 'rb').read)
 ec2_rootname = specs['ec2_rootname']
 service_name = specs['service_name'] || 'regression-tool'
-basedir      = File.basename(File.expand_path(__dir__ + "/.."))
-deploy_dir   = "/ebsmount/www/#{basedir}"
+# Fixed in config rather than derived from the local checkout's directory name,
+# so a clone under a different name still deploys to the right place.
+deploy_dir   = specs['deploy_dir'] || '/ebsmount/www/tios-regression-tool'
 
 # Which environment to target (defaults to production, matches the tag:env filter).
 env = ENV['DEPLOY_ENV'] || 'production'
@@ -74,7 +75,7 @@ puts "deploy started..."
 
 instances = output.split
 
-instances.map do |ip|
+results = instances.map do |ip|
   Thread.new do
     remote = <<~REMOTE
       set -e
@@ -90,8 +91,17 @@ instances.map do |ip|
     REMOTE
 
     puts "==> deploying to #{ip}"
-    system("ssh", "-o", "StrictHostKeyChecking=no", "tiostech@#{ip}", "bash -l -c #{remote.shellescape}")
+    ok = system("ssh", "-o", "StrictHostKeyChecking=no", "tiostech@#{ip}", "bash -l -c #{remote.shellescape}")
+    [ip, ok]
   end
-end.each(&:join)
+end.map(&:value)
+
+failed = results.reject { |_ip, ok| ok }.map(&:first)
+
+unless failed.empty?
+  puts "ERROR: Deployment FAILED on: #{failed.join(', ')}"
+  puts "Scroll up for that host's output. Hosts not listed deployed successfully."
+  exit(-1)
+end
 
 puts "Deployment finished..."

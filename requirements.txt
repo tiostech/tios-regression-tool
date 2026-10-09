@@ -9,4 +9,3 @@ sqlalchemy
 cryptography
 pyyaml
 statsmodels
-pymysql
