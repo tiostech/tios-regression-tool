@@ -25,6 +25,14 @@ def clean_id(raw_input: str) -> str:
     return re.sub(r"\D", "", last_part)
 
 
+def clean_id_list(raw_input: str) -> list[str]:
+    """Splits comma-separated IDs and cleans each one with clean_id, dropping blanks and duplicates."""
+    if not raw_input:
+        return []
+    ids = [clean_id(part) for part in raw_input.split(",")]
+    return list(dict.fromkeys(i for i in ids if i))
+
+
 def format_regex_pattern(field: str) -> str:
     """Safely wraps search terms in regex word boundaries (\b) and allows flexible spacing."""
     field_clean = re.sub(r'\s+', ' ', field.strip())
@@ -108,6 +116,25 @@ def render_links_only(text_val: str) -> str:
         return f'<a href="{href}" target="_blank" style="color: #0066cc; text-decoration: underline; font-weight: 500;">{label}</a>'
 
     return re.sub(r'\[([^\]]+)\]\s*\(([^)]+)\)', link_replacer, s)
+
+
+def add_ecore_note_link(cell_html: str, market: str, me_id: str, note_dt) -> str:
+    """Appends a small 'See note in ECore' link under a table cell's text."""
+    if pd.isna(note_dt):
+        return cell_html
+    d = pd.to_datetime(note_dt)
+    day = f"{d.year}-{d.month}-{d.day}"
+    url = (
+        f"https://energycore.tioscapital.com/{market.lower()}/monelem_quick_notes/transmission?"
+        f"monitored_element_name=&monitored_element_id={me_id}&start_dt={day}&stop_dt={day}&"
+        f"outage_equipment_id=&outage_equipment_operator=AND&not_outage_equipment_id=&"
+        f"not_outage_equipment_operator=AND&outage_equipment_filter=&commit=Analyze%21"
+    )
+    link = (
+        f'<div style="margin-top: 6px; font-size: 0.85em;">'
+        f'<a href="{url}" target="_blank" style="color: #0066cc;">See note in ECore</a></div>'
+    )
+    return f"{cell_html}{link}"
 
 
 def highlight_matches(text_str: str, terms: list[str]) -> str:
@@ -279,18 +306,20 @@ def fetch_outage_names(search_type: str, raw_input_id: str, outage_mkt: str, raw
         target_eq_ids = list(raw_eq_ids_tuple)
 
     elif search_type == "Group ID":
-        cleaned_num = clean_id(raw_input_id)
-        if cleaned_num:
+        cleaned_nums = clean_id_list(raw_input_id)
+        if cleaned_nums:
             try:
                 with engine.connect() as conn:
+                    id_placeholders = ", ".join([f":i{i}" for i in range(len(cleaned_nums))])
                     assoc_query = text(f"""
                         SELECT associated_group_id
                         FROM {outage_mkt}_outage_group_associations
-                        WHERE group_id = :grp_id
+                        WHERE group_id IN ({id_placeholders})
                     """)
-                    assoc_res = conn.execute(assoc_query, {"grp_id": cleaned_num}).fetchall()
+                    assoc_params = {f"i{i}": gid for i, gid in enumerate(cleaned_nums)}
+                    assoc_res = conn.execute(assoc_query, assoc_params).fetchall()
                     associated_group_ids = [str(row[0]) for row in assoc_res if row[0] is not None]
-                    all_group_ids = list(dict.fromkeys([cleaned_num] + associated_group_ids))
+                    all_group_ids = list(dict.fromkeys(cleaned_nums + associated_group_ids))
 
                     if all_group_ids:
                         placeholders = ", ".join([f":g{i}" for i in range(len(all_group_ids))])
@@ -627,7 +656,10 @@ search_type = st.sidebar.radio(
 
 raw_input_id = st.sidebar.text_input(
     f"Enter {search_type}",
-    value=""
+    value="",
+    help="To search several at once, separate them with commas "
+         "(e.g. `123, 456` for IDs, or `string one, string two` for strings). "
+         "Notes matching ANY of them are shown."
 )
 
 st.sidebar.markdown("---")
@@ -673,24 +705,26 @@ if search_type == "Manual string":
                 search_fields.append(cleaned_term)
 
 else:
-    cleaned_num = clean_id(raw_input_id)
+    cleaned_nums = clean_id_list(raw_input_id)
 
-    if cleaned_num:
+    if cleaned_nums:
         if search_type == "Equipment ID":
-            raw_eq_ids.append(cleaned_num)
+            raw_eq_ids.extend(cleaned_nums)
 
         elif search_type == "Group ID":
             try:
                 with engine.connect() as conn:
+                    id_placeholders = ", ".join([f":i{i}" for i in range(len(cleaned_nums))])
                     assoc_query = text(f"""
                         SELECT associated_group_id
                         FROM {outage_market}_outage_group_associations
-                        WHERE group_id = :grp_id
+                        WHERE group_id IN ({id_placeholders})
                     """)
-                    assoc_res = conn.execute(assoc_query, {"grp_id": cleaned_num}).fetchall()
+                    assoc_params = {f"i{i}": gid for i, gid in enumerate(cleaned_nums)}
+                    assoc_res = conn.execute(assoc_query, assoc_params).fetchall()
                     associated_group_ids = [str(row[0]) for row in assoc_res if row[0] is not None]
 
-                    all_group_ids = list(dict.fromkeys([cleaned_num] + associated_group_ids))
+                    all_group_ids = list(dict.fromkeys(cleaned_nums + associated_group_ids))
 
                     if outage_market not in ["spp", "pjm"]:
                         for gid in all_group_ids:
@@ -713,7 +747,7 @@ else:
             except Exception as e:
                 st.warning(f"Could not fetch group associations or equipment members: {e}")
                 if outage_market not in ["spp", "pjm"]:
-                    raw_group_ids.append(f"GID {cleaned_num}")
+                    raw_group_ids.extend(f"GID {gid}" for gid in cleaned_nums)
 
         # SPECIAL CASE 1: Current Market = SPP and Outage Market = MISO
         if current_market == "spp" and outage_market == "miso":
@@ -1017,20 +1051,21 @@ if st.sidebar.button("Run Search", type="primary"):
                     # Build URL parameters for annotation search links based on search context & cross-market rules
                     ann_group_param = ""
                     ann_outage_param = ""
-                    cleaned_search_id = clean_id(raw_input_id)
+                    cleaned_search_ids = clean_id_list(raw_input_id)
                     is_cross_market = current_market.lower() != outage_market.lower()
 
-                    if search_type == "Group ID" and cleaned_search_id:
+                    # With several IDs entered, ECore takes them as a comma-separated list
+                    if search_type == "Group ID" and cleaned_search_ids:
                         if is_cross_market:
-                            ann_group_param = f"{outage_market.lower()}:g:{cleaned_search_id}"
+                            ann_group_param = ",".join(f"{outage_market.lower()}:g:{i}" for i in cleaned_search_ids)
                         else:
-                            ann_group_param = f"g:{cleaned_search_id}"
+                            ann_group_param = ",".join(f"g:{i}" for i in cleaned_search_ids)
 
-                    elif search_type == "Equipment ID" and cleaned_search_id:
+                    elif search_type == "Equipment ID" and cleaned_search_ids:
                         if is_cross_market:
-                            ann_outage_param = f"{outage_market.lower()}:{cleaned_search_id}"
+                            ann_outage_param = ",".join(f"{outage_market.lower()}:{i}" for i in cleaned_search_ids)
                         else:
-                            ann_outage_param = cleaned_search_id
+                            ann_outage_param = ",".join(cleaned_search_ids)
 
                     for tab, g in zip(tabs, me_groups):
                         with tab:
@@ -1078,6 +1113,10 @@ if st.sidebar.button("Run Search", type="primary"):
                                 sub_df['body'] = sub_df['body'].apply(clean_body_text_for_display)
                                 sub_df['body'] = sub_df['body'].apply(lambda x: highlight_matches(x, search_fields))
                                 sub_df['body'] = sub_df['body'].apply(render_links_only)
+                                sub_df['context'] = [
+                                    add_ecore_note_link(c, current_market, me_id, d)
+                                    for c, d in zip(sub_df['context'], sub_df['dt'])
+                                ]
 
                                 html_table = sub_df.to_html(escape=False, index=False)
                                 st.markdown(
