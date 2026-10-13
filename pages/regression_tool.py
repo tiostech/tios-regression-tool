@@ -4,8 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 import math
 from sqlalchemy.exc import OperationalError
-from xgboost import XGBRegressor
-from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor, XGBClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.impute import SimpleImputer
 from datetime import timedelta, datetime
@@ -567,17 +567,17 @@ with hc2:
 if st.session_state.show_help:
     st.sidebar.info("""
     **Custom Expression Builder Help**
-    * **Format:** One equation per line.
-    * **Rolling Averages:** Use `rolling_average(variable, window)`.
-    * **The Window Parameter:** The second parameter (e.g., `3`) specifies the lookback period in hours.
-    * **The Underscore (`_`) Prefix:** Start an internal, hidden variable with an underscore in order to use a custom variable in a rolling average.
+- **Format:** One equation per line.
+- **Rolling Averages:** Use `rolling_average(variable, window)`.
+- **The Window Parameter:** The second parameter (e.g., `3`) specifies the lookback period in hours.
+- **The Underscore (`_`) Prefix:** Start an internal, hidden variable with an underscore in order to use a custom variable in a rolling average.
     
     **Syntax Examples:**
-    * **Standard Formula:**
+- **Standard Formula:**
       `IOWA_STRESS = (miso_load_ALTW + miso_load_MEC) - miso_wind_Meteologica_North_Iowa`
-    * **Simple Rolling Average (3-Hour Window):**
+- **Simple Rolling Average (3-Hour Window):**
       `ALTW_3HR_ROLL_AVG = rolling_average(miso_load_ALTW, 3)`
-    * **Multi-Step Rolling Average:**
+- **Multi-Step Rolling Average:**
       `_IOWA_STRESS = (miso_load_ALTW + miso_load_MEC) - miso_wind_Meteologica_North_Iowa`
       `IOWA_STRESS_3HR = rolling_average(_IOWA_STRESS, 3)`
         
@@ -732,8 +732,6 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
 
             X_train_clean = X_train[features_list].copy()
 
-            X_train_clean = X_train[features_list].copy()
-
             total_hours = len(plant_data_full)
 
             if total_hours >= 48:
@@ -806,6 +804,27 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
             preds_in = model.predict(X_train_imputed)
 
             insample_r2 = r2_score(y_train, preds_in)
+
+            # Fit Thirds Classifier for Probability Distributions
+            p33 = float(np.percentile(y_train, 33.333))
+            p67 = float(np.percentile(y_train, 66.667))
+
+            def categorize_thirds(val):
+                if val <= p33:
+                    return 0  # Low
+                elif val <= p67:
+                    return 1  # Medium
+                else:
+                    return 2  # High
+
+            y_train_class = y_train.apply(categorize_thirds)
+
+            if model_choice == "Random Forest":
+                clf = RandomForestClassifier(n_estimators=150, max_depth=4, random_state=42, n_jobs=4)
+            else:
+                clf = XGBClassifier(n_estimators=80, max_depth=3, learning_rate=0.05, random_state=42, n_jobs=4)
+
+            clf.fit(X_train_imputed, y_train_class)
 
             unique_days = sorted(plant_data_full["dt"].unique())
             wf_preds = np.full(len(plant_data_full), np.nan)
@@ -923,15 +942,27 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
                 X_fc = fc_features.drop(
                     columns=[c for c in cols_to_drop_fc if c in fc_features.columns]
                 )
-                from sklearn.impute import SimpleImputer
 
                 X_fc = X_fc.reindex(columns=features_list, fill_value=np.nan)
-                X_fc = pd.DataFrame(
+                X_fc_imputed = pd.DataFrame(
                     imputer.transform(X_fc), 
                     columns=features_list
                 )
 
-                fc_features["mw"] = model.predict(X_fc)
+                fc_features["mw"] = model.predict(X_fc_imputed)
+                
+                # Predict class probabilities for the forecast horizon
+                clf_probs = clf.predict_proba(X_fc_imputed)
+                classes = list(clf.classes_)
+                
+                low_idx = classes.index(0) if 0 in classes else None
+                med_idx = classes.index(1) if 1 in classes else None
+                high_idx = classes.index(2) if 2 in classes else None
+
+                fc_features["prob_low"] = clf_probs[:, low_idx] if low_idx is not None else 0.0
+                fc_features["prob_med"] = clf_probs[:, med_idx] if med_idx is not None else 0.0
+                fc_features["prob_high"] = clf_probs[:, high_idx] if high_idx is not None else 0.0
+
                 target_ts = pd.to_datetime(fc_date)
                 last_actual_ts = pd.to_datetime(last_actual_time)
 
@@ -954,12 +985,35 @@ if st.sidebar.button("Run Analysis", key="r_btn"):
             else:
                 wf_oos_r2 = np.nan
 
-            # Display metrics across 3 columns
+            unit_label = "$" if gen_id == "RDT_DA_PRICES" else "MW"
+
+            # Display Running Thirds Breakdown
+            if not forecast_df.empty:
+                prob_low_avg = forecast_df["prob_low"].mean() * 100
+                prob_med_avg = forecast_df["prob_med"].mean() * 100
+                prob_high_avg = forecast_df["prob_high"].mean() * 100
+
+                st.subheader(f"Output Thirds Probability Breakdown ({fc_date})")
+                pcol1, pcol2, pcol3 = st.columns(3)
+
+                with pcol1:
+                    st.metric("Running Low", f"{prob_low_avg:.1f}%", help=f"Defined as output <= {p33:.2f} {unit_label}")
+                    st.caption(f"**Low Tier:** ≤ {p33:.2f} {unit_label}")
+
+                with pcol2:
+                    st.metric("Running Medium", f"{prob_med_avg:.1f}%", help=f"Defined as output between {p33:.2f} and {p67:.2f} {unit_label}")
+                    st.caption(f"**Medium Tier:** {p33:.2f} to {p67:.2f} {unit_label}")
+
+                with pcol3:
+                    st.metric("Running High", f"{prob_high_avg:.1f}%", help=f"Defined as output > {p67:.2f} {unit_label}")
+                    st.caption(f"**High Tier:** > {p67:.2f} {unit_label}")
+
+                st.markdown("---")
+
+            # Display standard accuracy metrics across 3 columns
             m1, m2, m3 = st.columns(3)
             m1.metric("In-Sample R²", f"{insample_r2:.3f}")
             m2.metric("Walk-Forward OOS R²", "N/A" if np.isnan(wf_oos_r2) else f"{wf_oos_r2:.3f}")
-            
-            unit_label = "$" if gen_id == "RDT_DA_PRICES" else "MW"
             m3.metric(
                 "Tracking MAE (Last 24h)", "N/A" if np.isnan(mae) else f"{mae:.2f} {unit_label}"
             )
