@@ -1,0 +1,19 @@
+# Dependencies for the Claude Desktop bundle (see bin/package-desktop). Claude Desktop
+# installs these with uv the first time the extension starts. Only what mcp_server.py
+# imports -- the Streamlit app's modelling stack (xgboost, scikit-learn, ...) is left out.
+[project]
+name = "energycore-outages"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.3,<3",
+    "pandas>=2.3",
+    "numpy>=2.2",
+    "pyarrow>=25",
+    "sqlalchemy>=2.0",
+    "pymysql>=1.2",
+    "cryptography",
+    "pyyaml>=6.0",
+    # lib/db.py imports streamlit for the app's caching decorators.
+    "streamlit>=1.65",
+]

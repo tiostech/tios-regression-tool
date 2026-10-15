@@ -4,3 +4,4 @@ config/mysql.yml
 .venv
 .idea__pycache__/
 *.pyc
+dist/

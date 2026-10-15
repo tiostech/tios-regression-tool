@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/dist/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "energycore-outages",
+  "display_name": "EnergyCore Outages",
+  "version": "0.1.0",
+  "description": "Read-only transmission outage search, binding constraint drivers, and market conditions from tioscore_production.",
+  "long_description": "The trading desk's outage and shadow price search for Claude Desktop. Runs locally and reads tioscore_production through your SSH tunnel (default 127.0.0.1:3309), and the S3 caches through your normal AWS credentials (~/.aws). Start the tunnel before using the tools.",
+  "author": {
+    "name": "Tios Capital"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "mcp_server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["--directory", "${__dirname}", "run", "mcp_server.py"],
+      "env": {
+        "TIOS_DB_USERNAME": "${user_config.db_username}",
+        "TIOS_DB_PASSWORD": "${user_config.db_password}",
+        "TIOS_DB_HOST": "${user_config.db_host}",
+        "TIOS_DB_PORT": "${user_config.db_port}"
+      }
+    }
+  },
+  "user_config": {
+    "db_username": {
+      "type": "string",
+      "title": "Database username",
+      "description": "Your tioscore_production MySQL username (mysql_slave: username in config/mysql.yml).",
+      "required": true
+    },
+    "db_password": {
+      "type": "string",
+      "title": "Database password",
+      "description": "Your MySQL password. Stored in the system keychain.",
+      "sensitive": true,
+      "required": true
+    },
+    "db_host": {
+      "type": "string",
+      "title": "Tunnel host",
+      "description": "Local end of the SSH tunnel to the database.",
+      "default": "127.0.0.1",
+      "required": false
+    },
+    "db_port": {
+      "type": "string",
+      "title": "Tunnel port",
+      "description": "Local port of the SSH tunnel to the database.",
+      "default": "3309",
+      "required": false
+    }
+  },
+  "tools": [
+    {"name": "list_upcoming_outages", "description": "Transmission outages planned to start on a day."},
+    {"name": "get_outage_documentation", "description": "Desk notes and shadow price history for one outage."},
+    {"name": "list_binding_constraints", "description": "Constraints that bound on a day, largest shadow price total first."},
+    {"name": "get_constraint_drivers", "description": "Data for explaining why one constraint bound on a day."},
+    {"name": "get_market_conditions", "description": "Hourly energy prices, RTEP, and stress index for a day."},
+    {"name": "get_autoflow", "description": "Hourly flow that zonal wind, solar, and load put on a constraint."},
+    {"name": "get_outage_impacts", "description": "How much each outage in effect loads one constraint."}
+  ],
+  "tools_generated": false,
+  "prompts_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "keywords": ["outages", "transmission", "constraints", "pjm", "miso"]
+}

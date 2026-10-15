@@ -1,0 +1,194 @@
+=== MISO RT CONSTRAINT 226984: TMP141_SIOUX_CITY_KV1A_XFMR_FLO_SIOUX_CITY_KV5A_ (monitored element 5513) on 2026-10-05 ===
+
+--- Hourly shadow prices ---
+hr	shadow_price
+6	81
+7	629
+8	711
+9	371
+10	244
+11	315
+12	374
+13	384
+14	434
+15	321
+16	275
+17	74
+18	26
+19	276
+Total 4516 over 14 hours.
+
+--- Market conditions: energy prices, our forecasts (as of the day-ahead deadline), stress index ---
+Sources: rtep = tios.rtep.samprf.pm.20250127 (tios_configs tea-config.miso); daep = tios.daep.samprf.pm.20250422 (tios_configs tea-config.miso); flex_daep = flex.daep.20251101 (tios_configs global-config.miso); stress_index = s3://tios-quantforecasts-production/working-data/stress-index/miso/lion-stress-index-v3/miso-stress-index-preview-for-2026-10-05.csv (S3).
+Averages: rt_energy_price 32.1 while binding vs 28.5 otherwise; rtep 39.7 while binding vs 36.0 otherwise; rt_minus_rtep -7.6 while binding vs -7.5 otherwise; stress_level 407.4 while binding vs 322.6 otherwise.
+hr	da_energy_price	rt_energy_price	rtep	rt_minus_rtep	daep	flex_daep	stress_level	miso_reserve_margin_meteo_iso_avg	shadow_price
+1	30.2	29.1	32.7	-3.6	32.4	33.1	310.8	43879.4	
+2	28.9	27.9	32.0	-4.1	31.6	32.4	300.9	45289.4	
+3	28.5	26.2	31.6	-5.3	30.4	31.9	295.2	46101.4	
+4	28.2	29.5	33.0	-3.6	30.6	32.1	293.4	46364.4	
+5	31.3	29.5	36.6	-7.0	32.6	34.8	301.3	45233.9	
+6	44.9	38.8	40.1	-1.3	46.8	42.5	323.1	42121.4	80.9
+7	66.5	55.3	45.9	9.4	60.0	49.6	351.9	38012.9	629.3
+8	49.5	48.3	38.2	10.0	47.9	43.6	343.4	39222.9	711.1
+9	27.5	19.0	27.3	-8.3	30.3	31.4	289.8	46883.4	370.6
+10	23.9	21.7	24.1	-2.4	27.9	25.9	253.4	52073.9	243.9
+11	24.5	23.5	25.3	-1.8	28.2	25.8	249.3	52665.4	314.9
+12	24.8	24.6	24.7	-0.1	28.2	26.1	248.7	52741.9	374.1
+13	24.6	24.3	27.4	-3.2	29.4	26.2	252.5	52208.4	384.5
+14	25.8	25.2	26.4	-1.2	30.5	25.9	254.9	51859.4	434.3
+15	27.2	24.4	28.9	-4.5	33.8	26.5	257.0	51563.4	321.2
+16	27.9	22.9	29.4	-6.4	34.6	27.7	261.3	50948.9	275.0
+17	40.9	26.6	34.9	-8.3	41.4	37.2	468.8	47845.4	74.4
+18	95.6	42.4	68.3	-25.9	72.5	67.7	1070.6	39801.9	25.5
+19	182.7	51.8	114.5	-62.7	87.9	122.8	1078.5	33356.9	275.9
+20	68.1	31.4	60.0	-28.6	65.8	69.5	493.7	34060.9	
+21	48.3	31.6	46.4	-14.8	47.2	46.2	355.6	37483.9	
+22	42.3	27.7	35.3	-7.6	33.9	34.9	323.9	42006.4	
+23	35.6	26.4	27.7	-1.4	31.0	28.4	289.9	46865.4	
+24	33.1	25.5	24.8	0.7	27.5	25.3	261.6	50909.9	
+
+--- Generator impacts, HE5 -> HE8 (auto) ---
+load_mw = -sf * d_mw: + loads the constraint, - relieves it. sf < 0 means more output loads it.
+Factor set: dependency-recent, fit at 2026-10-02 20:15, updated 2026-10-03 10:59.
+Net from 133 mapped plants: +52 MW (solar -0, other +52; excluding possible redispatch +54).
+name	fuel	sf	base_mw	compare_mw	d_mw	load_mw	possible_redispatch	sources	disagreement
+Blazing Star 2 Wind Farm (BLZS2), Blazing Star Wind Farm 1 (	Wind	-0.041	104	192	87	4		muse,meteologica	muse +106 / meteologica +69
+Chanarambie Power Partners, LLC (WND1), Moraine II Wind LLC	Wind	-0.051	11	67	57	3		muse,meteologica	
+Deuel Harvest Wind Energy LLC (GEN1)	Wind	-0.042	21	89	67	3		muse,meteologica	muse +29 / meteologica +46
+Buffalo Ridge I LLC (1), Buffalo Ridge II LLC (1)	Wind	-0.046	16	70	54	2		muse,meteologica	muse +14 / meteologica +24 / lpi +8
+Foxtail Wind, LLC (1), Tatanka Wind Power LLC (TW1)	Wind	-0.040	173	234	61	2		muse,meteologica,gs	muse +34 / meteologica +19 / lpi +14; muse +34 / gs +75 / meteologica +16 / lpi +38
+MISO - Greenback Energy (56413) + MISO - Lake Benton I (5520	wind-farm	-0.052	16	62	46	2		meteologica	
+Crowned Ridge Wind II Energy Center (CRW2)	Wind	-0.041	8	66	59	2		muse,meteologica	muse +85 / meteologica +32 / lpi +87
+Crowned Ridge Wind Energy Center (CTTL1)	Wind	-0.041	25	77	52	2		muse,meteologica	muse +73 / meteologica +31 / lpi +87
+MISO - Prairie Rose Wind Farm (57644)	wind-farm	-0.066	18	49	31	2		meteologica	
+Dakota Range Wind (DKR01)	Wind	-0.041	30	79	49	2		muse,meteologica	
+Dakota Range III Wind Project (WTG)	Wind	-0.041	10	59	49	2		muse,meteologica	muse +20 / meteologica +77
+Community Wind North LLC (34505), MinnDakota Wind LLC (2)	Wind	-0.045	15	59	44	2		muse,meteologica	
+Nobles 2 Wind Project (WT1)	Wind	-0.057	10	44	35	2		muse,meteologica	
+MISO - Blazing Star 2 Wind Farm (61650)	wind-farm	-0.041	19	65	46	2		meteologica	
+MISO - Red Pine Wind Project (61357)	wind-farm	-0.040	19	65	46	2		meteologica	meteologica +46 / lpi +0
+
+--- Zonal load, HE5 -> HE8 ---
+zone	base_mw	compare_mw	d_mw
+MISO	63394	73300	9906
+Central	30088	35463	5375
+LRZ2_7	14796	17933	3138
+North	14457	17412	2955
+LRZ1	8900	10945	2045
+LRZ8_9_10	18849	20424	1576
+South	18849	20424	1576
+LRZ3_5	8325	9806	1481
+LRZ6	8633	9805	1172
+LRZ4	3891	4386	495
+
+--- Autoflow (pseudo_actuals) ---
+Coefficients from constraint 226984, computed 2026-10-08 00:01; 82 of 95 zones have data (pseudo_actuals, meteologica). + MW loads the constraint, - relieves it. For hours that have not happened yet, pseudo actuals are the latest forecast.
+hr	autoflow	solar	wind	load	shadow_price
+1	372	0	144	229	
+2	380	0	156	224	
+3	392	0	170	222	
+4	414	0	188	226	
+5	435	0	198	237	
+6	465	0	210	255	81
+7	498	-1	231	268	629
+8	508	-9	247	271	711
+9	500	-25	251	274	371
+10	490	-33	243	281	244
+11	484	-35	233	286	315
+12	484	-36	231	289	374
+13	498	-36	242	293	384
+14	508	-36	247	297	434
+15	505	-36	241	300	321
+16	482	-34	209	307	275
+17	492	-24	206	310	74
+18	502	-7	201	308	26
+19	497	1	191	305	276
+20	476	0	177	299	
+21	459	0	172	287	
+22	437	0	170	267	
+23	416	0	166	250	
+24	391	0	152	239	
+Change HE5 -> HE8: +73 MW.
+Zones that moved most, HE5 -> HE8:
+coefficient_type	iso	zone	coefficient	base_mw	compare_mw	d_leverage
+load	miso	LRZ3_5	+0.0159	8248.0	9739.0	23.7
+load	miso	LRZ1	-0.0096	8832.0	10938.0	-20.2
+wind	miso	Meteologica_North_North-Dakota	+0.0295	1638.0	2179.0	15.9
+wind	spp	Meteologica_Reserve-Zone-1	+0.0315	1050.0	1515.0	14.7
+wind	miso	Meteologica_North_South-Dakota	+0.0324	216.0	584.0	11.9
+load	spp	NPPD	-0.0203	1612.0	1888.0	-5.6
+load	pjm	MIDATL	+0.0013	22603.0	26736.0	5.5
+load	miso	LRZ2_7	+0.0012	14945.0	18166.0	4.0
+
+--- Transmission outage impacts (network model; outages in effect HE6-HE19) ---
+Case 2026-03-01: monitored SIOUXCY4 - SIOUXCY A1 (branch 64569); contingency SIOUXCY - SIOUXCY A3, SIOUXCY4 - SIOUXCY A1, SIOUXCY5 - SIOUXCY A2.
+Limit: 240 MW from PowerWorld case 2026-03-01 limit.
+Flow in the binding direction (from monitored element name): base case 81 MW, after the contingency 128 MW (53% of limit), plus all significant outages 188 MW (78% of limit). (The case is a fixed snapshot, not today's dispatch.)
+17617 outages in effect, 2960 mapped to the model, 22 with a possible impact of at least 1 MW. individual = this outage alone; in_combination = what it adds on top of the others. + loads the constraint.
+market	outage_equipment_id	name	in_active	request_status	start	end	pre_ctg_lodf_pct	individual_mw	individual_pct	in_combination_mw	in_combination_pct	check
+miso	60023438	345.0 LAKEFLD NOBLES / 345 LAKEFLD NOBLES LAKEFNOBLE34_1	yes	Implemented, active table only	2026-09-14 09:23	2026-10-09 15:00	3.9	11.3	4.7	7.1	2.9	
+spp	431	Denison - Exira 161 kV Ckt 1		IMPLEMENTED	2025-09-12 10:05	2028-12-31 16:00	7.8	9.1	3.8	5.6	2.4	
+spp	31200875	Hoskins - Wakefield 230 kV		IMPLEMENTED	2026-10-05 09:59	2026-10-09 16:00	10.4	8.1	3.4	4.8	2.0	
+miso	60027194	345.0 BLKHAWK QUINN / 345 BLKHAWK QUINN BLKHAQUINN34_1	yes	Implemented, active table only	2026-09-23 09:40	2026-10-16 15:00	0.4	-7.3	-3.0	-4.6	-1.9	
+miso	60027961	345 KILLDEER QUINN KILLDQUINN34_1	yes	active table only	2026-09-23 09:40	2026-10-06 09:41	0.4	-6.9	-2.9	-4.4	-1.8	
+miso	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	yes	active table only	2026-10-03 03:48	2026-10-05 16:11	0.4	6.8	2.8	4.3	1.8	
+miso	60020498	230 ARROWHD SQBUTTE MP_ARR_SQB_DCL	yes	active table only	2023-11-15 18:08		0.4	6.5	2.7	4.1	1.7	
+miso	7932	345.0 EAU_CLA KING		Proposed	2026-09-27 08:00	2026-10-15 16:00	0.3	4.5	1.9	2.9	1.2	
+miso	60022294	345.0 SHEASLK WILMART / 345 SHEASLK WILMART SHEASWILMA34_1	yes	Completed, active table only	2026-07-21 07:46	2026-10-07 07:08	1.1	-4.1	-1.7	-2.6	-1.1	
+miso	60040812	161 PLYMOTH PLY_AC_WNDNG_1	yes	active table only	2026-04-09 13:23		8.8	-3.5	-1.4	-2.5	-1.0	
+miso	60040811	69 PLYMOTH PLY_AC_WNDNG_2	yes	active table only	2026-04-09 13:23		8.8	-3.5	-1.4	-2.5	-1.0	
+miso	60020419	69 LMARSTAP CRAIGMEC LMARSCRAIG69_1	yes	active table only	2026-07-30 12:21		21.8	2.9	1.2	1.6	0.7	
+
+--- Timing: 5-minute shadow prices and active-table outage changes ---
+Binding spells: 05:45-15:55 ($49,678); 16:25-16:35 ($892); 17:15-17:20 ($307); 18:20-18:35 ($3,310)
+312 active-table changes from 2026-10-05 03:45 to 2026-10-05 19:05 (the table updates every 15 minutes, so times are approximate). Showing outages with a modeled impact, and unmapped lines/transformers of 100 kV and up whose timing lines up with a price change.
+time	event	outage_equipment_id	name	before	after	lines_up	impact
+2026-10-05 06:11	back	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	428	596		yes
+2026-10-05 09:02	out	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	340	339		yes
+2026-10-05 16:11	back	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	0	170		yes
+
+--- EnergyCore outage matching and desk outage notes (monitored element 5513) ---
+Outage annotations on this element (newest first):
+annotation_id	name	outage_equipment_id	start_dt	stop_dt	notes
+4412	345.0 LAKEFLD NOBLES	5554	2026-09-14 09:49:00	2026-10-09 15:00:00	*** Trigger for congestion is GID 1252, 345.0 LAKEFLD NOBLES loading 15% FIDn. ** George Neal off on the direct HS loading 7% *** strong AutoFlow; ***
+4408	161.0 DICY TRIBOJI on [5513] SIOUXCY V1A1 KV1A1 <+1>	17640	2026-09-08 06:59:00	2026-09-11 16:00:00	*** [GID 3406, 161.0 DICY TRIBOJI] loading 8% FIDi. Good TLU with this congestion. Annotating this outage now *** strong HS stress in IA; *** strong L
+Desk flags and notes on the outages above:
+outage_equipment_id	flag_type	updated_at	notes
+60024167	auto_safe	2026-10-03 01:10:12	only has one very old annotation that is now archived. Downgrading to green. -AM, 2025-04-06
+60022294		2026-10-02 02:05:08	Very relieving on [ME 5639 CHUB_LK TR1 TR1_2] & [ME 5644 CHUB_LK TR1 TR1_1] ~ 18%/28% respectively. Prior contingency for [ME 834 LIME_CK LIME_BARTO16_1 1](https://energ
+60023438	alert	2026-09-30 19:48:24	Loads ME 1454 8%- CS - Noted as nearly equivalent to [GID 988, 345.0 SPLT_RT NOBLES] Loading 15% FIDi on [ME 5513 SIOUXCY V1A1 KV1A1 <+1>] Loading 9% FIDi on
+60027961	alert	2026-09-26 01:14:08	Loading 21% FIDi on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>]. Loading 13% FIDi on [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] Loading 8% PSI on [ME 2311
+7932	alert	2026-09-25 20:20:53	13% loading for [7MILECRK X-159 1] - spec [ME 1063 ALMA2 ALMAWABAC16_1 1 <-1>] - probably spec [ME 2514 ARROWHD ARROWHDTIE 1 <+1>; EAU_CLA EAU_CKING34_1 1 <-1>](https:/
+60027194	alert	2026-09-24 21:27:49	TDT driving significantly increased congestion on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>] and [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] in 2026 Loading 21% FIDi on [ME 834
+60026887	auto_watch	2026-09-20 19:26:39	Triggered congestion on [ME 443 FAIRFAX2 FAIRFARNOL16_1 1 <-1>], but the ongoing [GID 8083, 161.0 ARNOLD DWNTIND] was also likely required (PSI combination was 75% loading
+60059974	alert	2026-09-20 04:22:56	[ME 291 BLUEMOUN 5061 50 <-1>] - GID 197, 345.0 ARCADN CYPRESWF is the trigger for congestion and loading 13% per FIi and FIn Drove congestion on [ME 3771 SUSSEX 36341 1](https://energycore.tioscapita
+60026709	alert	2026-09-10 19:38:55	created a red flag due to annotating this for [ME 3895 LAURELSS LAUREJASPE16_1 1 <+1>] -AM, 2025-04-03
+60068622	auto_alert	2026-08-27 20:56:42	TDT - Annotated for [ME 4930 FORESTJC W-15 1] - Drove strong congestion in June 2025 - WPS >> CE. Relieves [ME 869 GRANVILL 3443 34] ~ 5% FIDi. Relieves [ME 291 BLUEMOUN
+60020892	auto_watch	2026-07-09 13:36:14	Drove congestion on [ME 1853 SIOUXFL SIOUXSPLIT23_1 1] along with other outages. - CB | 2026-07-09
+60026711	auto_watch	2026-05-31 01:11:25	[ME 1742 POWESHK POWESREASN16_1 1 <-1>] was 10% loading and contributed to increased congestion when Ottumwa was off. Other outages were OOS during congestion. Loading 10% FIDn on [ME 5381 DOUD2 DOUD2
+
+--- Generator outages and derates in effect (IIR) at plants that matter ---
+load_mw = sf * capacity offline: the flow added if the unit would otherwise have run. + loads the constraint.
+unit_name	prim_fuel	capacity_offline	sf	load_mw	outage_type	status	start	end	comments
+Clay Boswell 03	Coal Subbituminous	365	-0.021	-8	Planned	Future	2026-10-02	2026-10-22	Turbine maintenance, boiler inspection, valves, pumps, tubes
+R M Heskett 03 CT	Natural Gas	88	-0.039	-3	Planned	Future	2026-10-02	2026-10-06	Annual Borescope Inspection, Warranty Checks, Turning Gear Maintenance, Water-Wa
+
+--- Desk notes on monitored element 5513, last 14 days (newest first) ---
+2026-10-05 rt_shadow: *** [GID 1252, 345.0 LAKEFLD NOBLES] loading 15% FIDn.  ** Mankato and ** Emery lower on the HS loading 15%  *** strong AutoFlow; *** weak HSWS; * on and off peak LRZ3_5 load;* moderate summer temps in Sioux City IA
+2026-10-04 rt_shadow_forecast: NSC. We didnt forecast this very well the last couple of days. I wish I could have spent more time here, but the variables that have done well here historically were particularly bearish, so I deprioritized it. Could have been a bad prioritization decision in hindsight, but we'll see what happens 
+2026-10-03 rt_shadow: f
+2026-10-02 da_shadow: long 1OD; short 2OD
+2026-10-02 rt_shadow: f
+2026-10-02 rt_shadow: *** [GID 1252, 345.0 LAKEFLD NOBLES] loading 15% FIDn.  *** strong AutoFlow; *** weak HSWS; *** on-peak LRZ3_5 load;* moderate summer temps in Sioux City IA  This had largely gone away but came back relatively strong (and DA was on top of it). I am not seeing any clear triggers for why
+2026-10-01 rt_shadow: f
+2026-10-01 rt_shadow: f
+2026-09-28 rt_shadow: *** [GID 1252, 345.0 LAKEFLD NOBLES] loading 15% FIDn.  *** strong AutoFlow; *** weak HSWS; *** on-peak LRZ3_5 load;* moderate summer temps in Sioux City IA
+2026-09-23 rt_shadow_forecast: Added 1.1 scaling for 161.0 DICY LAKEFLD starting loading 10%
+2026-09-23 rt_shadow: *** [GID 1252, 345.0 LAKEFLD NOBLES] loading 15% FIDn.  *** strong AutoFlow; *** weak HSWS; *** on-peak LRZ3_5 load;* moderate summer temps in Sioux City IA
+
+=== WARNINGS (some data could not be loaded; results may be incomplete) ===
+No pseudo-actual cache for spa_meteologica_load_forecast_snapshots in 2026-10; those zones are left out for that month.
+Autoflow zones left out: blkw load (1 zones, no data table); eddy load (1 zones, no data table); lamar load (1 zones, no data table); mh_ont load (1 zones, no data table); mheb load (1 zones, no data table); mp_ont load (1 zones, no data table); ont_mh load (1 zones, no data table); spa load (1 zones, no data for these hours); spc load (1 zones, no data table); spc_wa load (1 zones, no data table); wa_spc load (1 zones, no data table); yad load (1 zones, no data table); mheb wind (1 zones, no data table).
+79 of 230 SPP outages mapped to MISO branches could not be found in the network model.
+594 of 979 PJM outages mapped to MISO branches could not be found in the network model.
+Some outage combinations split the network model; used single-outage superposition for them.

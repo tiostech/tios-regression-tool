@@ -1,0 +1,145 @@
+=== MISO DA CONSTRAINT 21754: WELSH-WILKES FLO WELSH-DIANA (monitored element 4880) on 2026-10-05 ===
+
+--- Hourly shadow prices ---
+hr	shadow_price
+12	9
+13	2
+14	38
+15	78
+16	87
+17	181
+18	386
+19	1452
+20	335
+21	181
+22	181
+23	149
+24	147
+Total 3227 over 13 hours.
+
+--- Market conditions: energy prices, our forecasts (as of the day-ahead deadline), stress index ---
+Sources: rtep = tios.rtep.samprf.pm.20250127 (tios_configs tea-config.miso); daep = tios.daep.samprf.pm.20250422 (tios_configs tea-config.miso); flex_daep = flex.daep.20251101 (tios_configs global-config.miso); stress_index = s3://tios-quantforecasts-production/working-data/stress-index/miso/lion-stress-index-v3/miso-stress-index-preview-for-2026-10-05.csv (S3).
+Averages: rt_energy_price 29.6 while binding vs 31.7 otherwise; rtep 42.2 while binding vs 33.3 otherwise; rt_minus_rtep -12.6 while binding vs -1.6 otherwise; stress_level 432.1 while binding vs 301.1 otherwise.
+hr	da_energy_price	rt_energy_price	rtep	rt_minus_rtep	daep	flex_daep	stress_level	miso_reserve_margin_meteo_iso_avg	shadow_price
+1	30.2	29.1	32.7	-3.6	32.4	33.1	310.8	43879.4	
+2	28.9	27.9	32.0	-4.1	31.6	32.4	300.9	45289.4	
+3	28.5	26.2	31.6	-5.3	30.4	31.9	295.2	46101.4	
+4	28.2	29.5	33.0	-3.6	30.6	32.1	293.4	46364.4	
+5	31.3	29.5	36.6	-7.0	32.6	34.8	301.3	45233.9	
+6	44.9	38.8	40.1	-1.3	46.8	42.5	323.1	42121.4	
+7	66.5	55.3	45.9	9.4	60.0	49.6	351.9	38012.9	
+8	49.5	48.3	38.2	10.0	47.9	43.6	343.4	39222.9	
+9	27.5	19.0	27.3	-8.3	30.3	31.4	289.8	46883.4	
+10	23.9	21.7	24.1	-2.4	27.9	25.9	253.4	52073.9	
+11	24.5	23.5	25.3	-1.8	28.2	25.8	249.3	52665.4	
+12	24.8	24.6	24.7	-0.1	28.2	26.1	248.7	52741.9	9.5
+13	24.6	24.3	27.4	-3.2	29.4	26.2	252.5	52208.4	1.8
+14	25.8	25.2	26.4	-1.2	30.5	25.9	254.9	51859.4	37.8
+15	27.2	24.4	28.9	-4.5	33.8	26.5	257.0	51563.4	77.5
+16	27.9	22.9	29.4	-6.4	34.6	27.7	261.3	50948.9	86.6
+17	40.9	26.6	34.9	-8.3	41.4	37.2	468.8	47845.4	181.4
+18	95.6	42.4	68.3	-25.9	72.5	67.7	1070.6	39801.9	386.0
+19	182.7	51.8	114.5	-62.7	87.9	122.8	1078.5	33356.9	1451.8
+20	68.1	31.4	60.0	-28.6	65.8	69.5	493.7	34060.9	335.3
+21	48.3	31.6	46.4	-14.8	47.2	46.2	355.6	37483.9	181.1
+22	42.3	27.7	35.3	-7.6	33.9	34.9	323.9	42006.4	181.3
+23	35.6	26.4	27.7	-1.4	31.0	28.4	289.9	46865.4	149.4
+24	33.1	25.5	24.8	0.7	27.5	25.3	261.6	50909.9	147.2
+
+--- Generator impacts, HE11 -> HE19 (auto) ---
+load_mw = -sf * d_mw: + loads the constraint, - relieves it. sf < 0 means more output loads it.
+Factor set: rt-matrix, fit at 2026-10-01 00:00, updated 2026-10-02 11:08.
+Net from 445 mapped plants: -75 MW (solar -79, other +4; excluding possible redispatch +302).
+name	fuel	sf	base_mw	compare_mw	d_mw	load_mw	possible_redispatch	sources	disagreement
+Montgomery County (1A, 1B, 1C)	Natural Gas	+0.122	99	977	878	-107	yes	muse	muse +293 / lpi +186
+Calcasieu (G101, G102)	Natural Gas	+0.093	51	284	233	-22	yes	muse	
+Alliance Refinery (GEN1, GEN2), Nine Mile Point (5, 6(4), 6A	Natural Gas	+0.064	1605	1943	338	-22	yes	muse,gs	muse +82 / gs +53
+Dow St Charles Operations (CGN1, CGN2, CSTG, STG), St. Charl	Natural Gas	+0.065	982	1281	298	-19	yes	muse,gs	muse +60 / gs +0
+Washington Parish Energy Center (CTG1, CTG2)	Natural Gas	+0.055	63	396	333	-18	yes	muse	
+Labadie (1, 2, 3, 4)	Coal	-0.030	1089	1695	605	18		muse,gs	muse +190 / gs +112 / lpi +77
+Bayou Cove Peaking Power (0001, 0002, 0003, 0004)	Natural Gas	+0.085	26	232	206	-18	yes	muse	
+Clay Boswell (3, 4)	Coal	-0.042	486	831	345	15		muse,gs	muse +176 / gs +54 / lpi +54
+George Neal N-S	Coal	-0.050	415	172	-242	-12	yes	gs	
+Lake Charles Power (1A, 1B, 1C)	Natural Gas	+0.093	823	945	123	-11	yes	muse	
+Highland Wind Project (IA) (HLWF, HLWF2, HLWF3, HLWF4, HLWF5	Wind	-0.048	75	290	215	10		muse,gs,meteologica	muse +51 / gs +72 / meteologica +76 / lpi +95
+MISO - Double Back Diamond (66624)	solar-farm	-0.026	389	12	-377	-10		meteologica	
+LaO Energy Systems (GEN1, GEN2, GEN3, GEN4, GEN5, GEN6), Pla	Natural Gas	+0.066	687	546	-141	9		muse,gs	muse -31 / gs +0
+Tenaska Frontier Generation Station (GTG1, GTG2, GTG3, STG1)	Natural Gas	+0.143	171	236	65	-9	yes	muse,gs	muse +43 / gs +0 / lpi +0
+Cottonwood Energy Project (CT1, CT2, CT3, CT4, ST1, ST2, ST3	Natural Gas	+0.093	499	593	94	-9	yes	muse,gs	
+
+--- Zonal load, HE11 -> HE19 ---
+zone	base_mw	compare_mw	d_mw
+MISO	74974	82568	7594
+LRZ8_9_10	22014	25224	3211
+South	22014	25224	3211
+Central	36001	38600	2599
+North	16960	18744	1784
+LRZ4	3833	5199	1366
+LRZ1	10334	11611	1276
+LRZ3_5	10292	11276	984
+LRZ6	10158	10654	496
+LRZ2_7	18343	18604	261
+
+--- Autoflow (pseudo_actuals) ---
+No autoflow for this constraint (see warnings).
+
+--- Transmission outage impacts (network model; outages in effect HE12-HE24) ---
+Case 2026-03-01: monitored WELSH - WILKE3-1 1 (branch 3466); contingency DIANA  7 - WELSH 1.
+Limit: 970 MW from PowerWorld case 2026-03-01 limit.
+Flow in the binding direction (from monitored element name): base case 261 MW, after the contingency 321 MW (33% of limit), plus all significant outages 397 MW (41% of limit). (The case is a fixed snapshot, not today's dispatch.)
+17586 outages in effect, 2955 mapped to the model, 30 with a possible impact of at least 1 MW. individual = this outage alone; in_combination = what it adds on top of the others. + loads the constraint.
+market	outage_equipment_id	name	in_active	request_status	start	end	pre_ctg_lodf_pct	individual_mw	individual_pct	in_combination_mw	in_combination_pct	check
+spp	5346	Turk - McNab 115kV		IMPLEMENTED	2026-10-05 09:22	2026-10-16 16:00	18.0	17.8	1.8	15.0	1.5	
+miso	60073076	345.0 FTSMTH		Implemented	2026-10-02 06:59	2026-10-17 16:00	2.1	11.7	1.2	10.2	1.0	
+miso	60073075	500.0 FTSMTH		Implemented	2026-10-02 06:59	2026-10-17 16:00	2.1	11.7	1.2	10.2	1.0	
+miso	60051541	345.0 BURN2 MTGY		Submitted	2026-09-08 08:00	2026-12-04 17:00	0.8	11.4	1.2	9.8	1.0	
+spp	4999	South Texarkana Co Op - Texarkana Plant 69 kV		COMPLETED	2026-09-30 08:11	2026-10-05 21:10	17.7	6.1	0.6	0.0	0.0	
+miso	60021832	345.0 SIOUX ROXF / 345 SIOUX ROXF S-ROXF-5	yes	Implemented, active table only	2026-10-05 00:05	2026-10-23 16:00	0.3	4.7	0.5	4.1	0.4	
+miso	60027194	345.0 BLKHAWK QUINN / 345 BLKHAWK QUINN BLKHAQUINN34_1	yes	Implemented, active table only	2026-09-23 09:40	2026-10-16 15:00	0.3	4.3	0.4	3.7	0.4	
+miso	60034097	500.0 HS_EHV MAGNET / 500 HS_EHV MAGNET HS_EHV_MAGNET8	yes	Implemented, active table only	2026-10-05 08:00	2026-10-29 17:00	1.1	-4.2	-0.4	-3.9	-0.4	
+spp	4545	Pleasant Hill - South Texarkana Co Op 69 kV		IMPLEMENTED	2026-09-30 08:11	2026-12-17 08:00	17.7	4.1	0.4	-1.8	-0.2	
+miso	60027961	345 KILLDEER QUINN KILLDQUINN34_1	yes	active table only	2026-09-23 09:40	2026-10-06 09:41	0.3	4.1	0.4	3.5	0.4	
+spp	3334	IPC - Pleasant Hill 69 kV		IMPLEMENTED	2026-10-05 21:12	2026-12-17 08:00	17.7	4.0	0.4	0.0	0.0	
+spp	1250	Bloomburg - IPC 69 kV		IMPLEMENTED	2026-10-05 21:12	2026-12-17 08:00	17.7	4.0	0.4	0.0	0.0	
+
+--- EnergyCore outage matching and desk outage notes (monitored element 4880) ---
+Desk flags and notes on the outages above:
+outage_equipment_id	flag_type	updated_at	notes
+60059447		2026-10-07 07:52:14	Shields [ME 5393 FTZT MCLY-BELU-1 C <-1>] ~ 33% FIDi. Loads [ME 29672 CYRENE_T AUBURN_CYREN 1 <-1>] ~ 9% FIDi. ME outage for [ME 29244 ROOT ROOT_MT
+60034097	alert	2026-10-07 01:14:33	Annotated for [ME 4167 COLGVL COLGVL_MABELV3 A <-1>], but has not been noted to be a risk in the past, there was last an overlap with congestion in 2020. PS 10-4-2026
+60021832	alert	2026-10-05 09:31:05	Annotated for [ME 5842 SIOUX S_ROXF_6700 A <+1>] - looks like other outages were OOS during congestion in 2021 per PAN - not planning to add filtered models unless we see more congestion on it. Prior
+60027961	alert	2026-09-26 01:14:08	Loading 21% FIDi on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>]. Loading 13% FIDi on [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] Loading 8% PSI on [ME 2311
+7932	alert	2026-09-25 20:20:53	13% loading for [7MILECRK X-159 1] - spec [ME 1063 ALMA2 ALMAWABAC16_1 1 <-1>] - probably spec [ME 2514 ARROWHD ARROWHDTIE 1 <+1>; EAU_CLA EAU_CKING34_1 1 <-1>](https:/
+60027194	alert	2026-09-24 21:27:49	TDT driving significantly increased congestion on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>] and [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] in 2026 Loading 21% FIDi on [ME 834
+60023234	alert	2026-09-23 21:17:38	Annotated for ME 158 Wabash XF. No other known risks. -AM/CS - Archived Loads 1534 Goodland and 1081 Las Vinc. Shields 5998 rising - MM TDT - Relieved Rising and Bunsonvil - tracking to see it there i
+60069277		2026-09-23 19:15:17	Drove strong congestion on these MEs along with [GID 1021, 345.0 LABADIE MTGY] in Sep 2026 - these were out for a while when we saw strong congestion. Congestion was driven by weakness in HS gens (Sio
+60031638	alert	2026-09-23 19:02:38	15% loading on ME 4569 per FIDn- CS only tracking to see if it ends on the 26th as planned ME outage for [ME 3285 LABADIE L_MTGY_4 A <-1>] Drove strong congestion on multpile constraints along with [G
+60026887	auto_watch	2026-09-20 19:26:39	Triggered congestion on [ME 443 FAIRFAX2 FAIRFARNOL16_1 1 <-1>], but the ongoing [GID 8083, 161.0 ARNOLD DWNTIND] was also likely required (PSI combination was 75% loading
+60059974	alert	2026-09-20 04:22:56	[ME 291 BLUEMOUN 5061 50 <-1>] - GID 197, 345.0 ARCADN CYPRESWF is the trigger for congestion and loading 13% per FIi and FIn Drove congestion on [ME 3771 SUSSEX 36341 1](https://energycore.tioscapita
+60068622	auto_alert	2026-08-27 20:56:42	TDT - Annotated for [ME 4930 FORESTJC W-15 1] - Drove strong congestion in June 2025 - WPS >> CE. Relieves [ME 869 GRANVILL 3443 34] ~ 5% FIDi. Relieves [ME 291 BLUEMOUN
+
+--- Generator outages and derates in effect (IIR) at plants that matter ---
+load_mw = sf * capacity offline: the flow added if the unit would otherwise have run. + loads the constraint.
+unit_name	prim_fuel	capacity_offline	sf	load_mw	outage_type	status	start	end	comments
+Callaway 01	Nuclear	1300	-0.037	-48	Planned	Ongoing	2026-09-26	2026-11-04	Refueling Maintenance Outage, Vessel, Reactor & Steam Generator Inspections, Con
+Prairie Island 01	Nuclear	593	-0.042	-25	Planned	Future	2026-10-02	2026-10-31	Re-fueling, fuel rod change-out, valves, pumps, tubes
+Acadia 26 ST	Combined Cycle Waste Heat	264	+0.081	22	Planned	Ongoing	2026-09-24	2026-10-10	Annual Turbine Inspection, Balance of Plant, HRSG Maintenance, Equipment Calibra
+Acadia 13 ST	Combined Cycle Waste Heat	264	+0.081	21	Planned	Ongoing	2026-09-24	2026-10-10	Annual Turbine Inspection, Balance of Plant, HRSG Maintenance, Equipment Calibra
+Prairie State 02	Coal Bituminous	883	-0.024	-21	Planned	Ongoing	2026-09-12	2026-10-10	Air Heater Replacement, Tube Repair/Replacement, Balance of Plant, Instrumentati
+Cottonwood 01 CT/HRSG	Natural Gas	199	+0.093	19	Planned	Future	2026-10-02	2026-10-11	Balance of plant inspection, borescope, valve, pumps, filters, winter prep maint
+Acadia 24 CT/HRSG	Natural Gas	215	+0.081	18	Planned	Ongoing	2026-09-24	2026-10-10	Annual Turbine Inspection, Balance of Plant, HRSG Maintenance, Equipment Calibra
+Acadia 25 CT/HRSG	Natural Gas	215	+0.081	18	Planned	Ongoing	2026-09-24	2026-10-10	Annual Turbine Inspection, Balance of Plant, HRSG Maintenance, Equipment Calibra
+Acadia 11 CT/HRSG	Natural Gas	215	+0.081	17	Planned	Ongoing	2026-09-24	2026-10-10	Annual Turbine Inspection, Balance of Plant, HRSG Maintenance, Equipment Calibra
+Acadia 12 CT/HRSG	Natural Gas	215	+0.081	17	Planned	Ongoing	2026-09-24	2026-10-10	Annual Turbine Inspection, Balance of Plant, HRSG Maintenance, Equipment Calibra
+Labadie 02	Coal Subbituminous	574	-0.030	-17	Planned	Future	2026-10-02	2026-10-25	Turbine Valves, Heater Section Inspection, Tube Repair, Boiler Cleaning, Balance
+Union 03 ST	Combined Cycle Waste Heat	255	+0.061	16	Planned	Future	2026-10-02	2026-11-05	Valves, Seals, Bearings, Gears, Couplings Inspection, Balance of Plant, Instrume
+
+--- Desk notes on monitored element 4880, last 14 days (newest first) ---
+2026-10-01 rt_shadow: f
+2026-10-01 rt_shadow: This has been hitting in SPP and is now shared with MISO   *** SPP [2239 Diana - Welsh 345 kV East] loading ~11% FIDi.   ** Wilkes running relatively high on HS looks relieving.   ** Stall Lamar and Harrison County low on HS look important. Relatively high *** MISO S + SOCO + TVA - SPP stress delta. ** Hot Shreveport HS feels-like and *** moderate/high z4 wind on LS during congestion.  
+
+=== WARNINGS (some data could not be loaded; results may be incomplete) ===
+No zonal coefficients for MISO constraint 21754 or any constraint with its name. EnergyCore only computes them for constraints in the 'miso' autoflow_constraints parameter.
+80 of 237 SPP outages mapped to MISO branches could not be found in the network model.
+594 of 981 PJM outages mapped to MISO branches could not be found in the network model.
+Some outage combinations split the network model; used single-outage superposition for them.

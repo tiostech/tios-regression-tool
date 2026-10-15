@@ -1,0 +1,128 @@
+=== MISO RT CONSTRAINT 28407: MEC34020_NEWSHAR_NEWSHPOWES69_1_1 (monitored element 3034) on 2026-10-05 ===
+
+--- Hourly shadow prices ---
+hr	shadow_price
+20	175
+21	1040
+22	681
+23	849
+24	764
+Total 3509 over 5 hours.
+
+--- Market conditions: energy prices, our forecasts (as of the day-ahead deadline), stress index ---
+Sources: rtep = tios.rtep.samprf.pm.20250127 (tios_configs tea-config.miso); daep = tios.daep.samprf.pm.20250422 (tios_configs tea-config.miso); flex_daep = flex.daep.20251101 (tios_configs global-config.miso); stress_index = s3://tios-quantforecasts-production/working-data/stress-index/miso/lion-stress-index-v3/miso-stress-index-preview-for-2026-10-05.csv (S3).
+Averages: rt_energy_price 28.5 while binding vs 31.1 otherwise; rtep 38.9 while binding vs 38.0 otherwise; rt_minus_rtep -10.3 while binding vs -6.9 otherwise; stress_level 344.9 while binding vs 379.2 otherwise.
+hr	da_energy_price	rt_energy_price	rtep	rt_minus_rtep	daep	flex_daep	stress_level	miso_reserve_margin_meteo_iso_avg	shadow_price
+1	30.2	29.1	32.7	-3.6	32.4	33.1	310.8	43879.4	
+2	28.9	27.9	32.0	-4.1	31.6	32.4	300.9	45289.4	
+3	28.5	26.2	31.6	-5.3	30.4	31.9	295.2	46101.4	
+4	28.2	29.5	33.0	-3.6	30.6	32.1	293.4	46364.4	
+5	31.3	29.5	36.6	-7.0	32.6	34.8	301.3	45233.9	
+6	44.9	38.8	40.1	-1.3	46.8	42.5	323.1	42121.4	
+7	66.5	55.3	45.9	9.4	60.0	49.6	351.9	38012.9	
+8	49.5	48.3	38.2	10.0	47.9	43.6	343.4	39222.9	
+9	27.5	19.0	27.3	-8.3	30.3	31.4	289.8	46883.4	
+10	23.9	21.7	24.1	-2.4	27.9	25.9	253.4	52073.9	
+11	24.5	23.5	25.3	-1.8	28.2	25.8	249.3	52665.4	
+12	24.8	24.6	24.7	-0.1	28.2	26.1	248.7	52741.9	
+13	24.6	24.3	27.4	-3.2	29.4	26.2	252.5	52208.4	
+14	25.8	25.2	26.4	-1.2	30.5	25.9	254.9	51859.4	
+15	27.2	24.4	28.9	-4.5	33.8	26.5	257.0	51563.4	
+16	27.9	22.9	29.4	-6.4	34.6	27.7	261.3	50948.9	
+17	40.9	26.6	34.9	-8.3	41.4	37.2	468.8	47845.4	
+18	95.6	42.4	68.3	-25.9	72.5	67.7	1070.6	39801.9	
+19	182.7	51.8	114.5	-62.7	87.9	122.8	1078.5	33356.9	
+20	68.1	31.4	60.0	-28.6	65.8	69.5	493.7	34060.9	175.2
+21	48.3	31.6	46.4	-14.8	47.2	46.2	355.6	37483.9	1040.2
+22	42.3	27.7	35.3	-7.6	33.9	34.9	323.9	42006.4	680.6
+23	35.6	26.4	27.7	-1.4	31.0	28.4	289.9	46865.4	848.5
+24	33.1	25.5	24.8	0.7	27.5	25.3	261.6	50909.9	764.2
+
+--- Generator impacts, HE19 -> HE21 (auto) ---
+load_mw = -sf * d_mw: + loads the constraint, - relieves it. sf < 0 means more output loads it.
+Factor set: rt-matrix, fit at 2026-10-06 00:00, updated 2026-10-07 11:08.
+Net from 8 mapped plants: -0 MW (solar +0, other -1; excluding possible redispatch +3).
+name	fuel	sf	base_mw	compare_mw	d_mw	load_mw	possible_redispatch	sources	disagreement
+Marshalltown (1, 2, 3), Marshalltown Generating Station (CTG	Natural Gas	-0.025	417	285	-131	-3	yes	muse,gs	muse -38 / gs +0
+Laurel Wind Farm (LWF)	Wind	-0.032	21	66	45	1		muse,gs,meteologica	muse +45 / gs +62 / meteologica +31 / lpi +67
+Vienna Wind Farm (VIIWF, VIWF)	Wind	-0.021	22	63	36	1		muse,gs,meteologica	muse +51 / gs +16 / meteologica +36
+English Farms (1)	Wind	-0.018	60	206	102	1		muse,gs,meteologica	muse +118 / gs +25 / meteologica +68 / lpi +1; muse +51 / gs +20 / meteologica +34
+Prairie Wind Farm (PWE)	Wind	-0.093	44	60	5	0		muse,gs,meteologica	muse -15 / gs +5 / meteologica +18
+High Prairie Wind Farm (HPWF)	Wind	+0.023	27	43	16	-0		muse,meteologica	muse +5 / meteologica +27
+MISO - Morris Solar (68048)	solar-farm	+0.020	9	0	-9	0		meteologica	
+Ottumwa (1)	Coal	+0.055	4	6	3	-0	yes	muse,gs	
+
+--- Zonal load, HE19 -> HE21 ---
+zone	base_mw	compare_mw	d_mw
+MISO	82568	79318	-3250
+Central	38600	36785	-1815
+LRZ8_9_10	25224	24157	-1067
+South	25224	24157	-1067
+LRZ2_7	18604	17784	-820
+LRZ6	10654	10154	-501
+LRZ3_5	11276	10778	-498
+North	18744	18376	-368
+LRZ4	5199	5016	-183
+LRZ1	11611	11430	-181
+
+--- Autoflow (pseudo_actuals) ---
+No autoflow for this constraint (see warnings).
+
+--- Transmission outage impacts (network model; outages in effect HE20-HE24) ---
+Case 2026-03-01: monitored NEW SHARON8 - POWESHK8 1 (branch 62191); contingency BONDURANT3 - MONTEZUMA 3 1.
+Limit: 72 MW from PowerWorld case 2026-03-01 limit.
+Flow in the binding direction (from monitored element name): base case 23 MW, after the contingency 43 MW (59% of limit), plus all significant outages 70 MW (98% of limit). (The case is a fixed snapshot, not today's dispatch.)
+17164 outages in effect, 2832 mapped to the model, 6 with a possible impact of at least 1 MW. individual = this outage alone; in_combination = what it adds on top of the others. + loads the constraint.
+market	outage_equipment_id	name	in_active	request_status	start	end	pre_ctg_lodf_pct	individual_mw	individual_pct	in_combination_mw	in_combination_pct	check
+miso	60052771	161.0 IRVINESS BEAC_ALT / 161 IRVINESS BEAC_ALT IRVINBEACO16_1	yes	Implemented, active table only	2026-10-05 06:58	2026-10-09 16:00	16.8	49.4	68.7	22.9	31.8	
+miso	60026887	345.0 ARNOLD MRGNVLY / 345 ARNOLD MRGNVLY ARNOLMRGNV34_1	yes	Implemented, active table only	2026-08-21 07:08	2026-11-02 16:00	0.1	5.5	7.7	2.3	3.2	
+miso	60027194	345.0 BLKHAWK QUINN / 345 BLKHAWK QUINN BLKHAQUINN34_1	yes	Implemented, active table only	2026-09-23 09:40	2026-10-16 15:00	0.1	2.5	3.5	0.6	0.8	
+miso	60027961	345 KILLDEER QUINN KILLDQUINN34_1	yes	active table only	2026-09-23 09:40	2026-10-06 09:41	0.1	2.4	3.3	0.6	0.8	
+miso	60026709	161 M_TOWN TOLEDO M_TOWTOLED16_1 / 161.0 M_TOWN TOLEDO	yes	active table only, Implemented	2026-09-10 07:39	2027-04-30 16:00	0.2	1.5	2.1	0.5	0.7	
+miso	60026711	161.0 BL_PLN_ TOLEDO / 161 BL_PLN_ TOLEDO BL_PLTOLED16_1	yes	Implemented, active table only	2026-04-20 11:15	2026-12-11 17:00	0.2	1.5	2.1	0.5	0.7	
+
+--- Timing: 5-minute shadow prices and active-table outage changes ---
+Binding spells: 19:40-23:55 ($42,105)
+57 active-table changes from 2026-10-05 17:40 to 2026-10-06 00:25 (the table updates every 15 minutes, so times are approximate). Showing outages with a modeled impact, and unmapped lines/transformers of 100 kV and up whose timing lines up with a price change.
+None of them.
+
+--- EnergyCore outage matching and desk outage notes (monitored element 3034) ---
+Shadow-outage detections (best score first):
+trade_dt	overall_score	temporal_lineup_score	outage_combination	avg_rt_shadow	match_strings
+2026-10-05	249.43		48084375	16.33	["IRVINBEACO16_1::IRVINESS"]
+2026-10-05	249.43		48084375	16.33	["IRVINBEACO16_1::IRVINESS"]
+2026-10-05	249.43		48084375	16.33	["IRVINBEACO16_1::IRVINESS"]
+2026-10-05	249.43		48084375	16.33	["IRVINBEACO16_1::IRVINESS"]
+Monitored element alerts (new outages matching past congested outages):
+for_date	outage_market_urn	new_outage_equipment_id	new_outage_element_string	match_type	past_outage_period_total_rt_shadow
+2026-10-05	miso	48084375	IRVINBEACO16_1::IRVINESS	exact	4989
+Outage annotations on this element (newest first):
+annotation_id	name	outage_equipment_id	start_dt	stop_dt	notes
+4230	161.0 DPRVRDBU PARNELL	60053668	2026-04-16 14:17:00	2026-04-17 10:53:00	Trigger for congestion is *** GID 12761, 161.0 DPRVRDBU PARNELL loading ~ 27% FIDi ~ 115% M. Congestion started and stopped with a perfect TLU when th
+3414	several outs on [3034] NEWSHAR NEWSHPOWES69_1 1 <-1>	48099588	2024-09-20 08:18:00	2024-10-18 15:00:00	*** [GID 10814, 161.0 POWESHK IRVINESS] is OOS loading 40% per FIDi. It has been out since 9/9 with no shadows likely due to [GID 3628, 161.0 POWESHK
+3414	several outs on [3034] NEWSHAR NEWSHPOWES69_1 1 <-1>	40078878	2024-10-05 11:21:00	2024-10-07 00:41:00	*** [GID 10814, 161.0 POWESHK IRVINESS] is OOS loading 40% per FIDi. It has been out since 9/9 with no shadows likely due to [GID 3628, 161.0 POWESHK
+3353	161.0 IRVINESS BEAC_AL	48084375	2024-08-05 08:19:00	2024-08-09 15:00:00	*** GID 10812, 161.0 IRVINESS BEAC_ALT driving congestion -- previous contingency and 50% loading per FID *** Ottumwa on the HS just came off longterm
+3154	345.0 OTTUMWA XF	60042541	2023-10-30 11:10:00	2024-01-29 14:21:00	per MUSE / FI / PSI *** Equip 60042541, GID 21996, 345.0 OTTUMWA XF loads ~25% alone primary driver / required outage. * equip 60023326, GID 10407, 69
+2281	345.0 OTTUMWA MNTZUMA on New shar - poweshk 69kv	48099599	2021-11-02 15:57:00	2021-12-23 16:00:00	***Equip 48099599, 345.0 OTTUMWA MNTZUMA, 3/18. ***High IA wind. Ottumwa is HS - currently running but lower
+2011	***161.0 POWESHK IRVINESS on Newshar Poweshk	48099588	2021-01-18 07:26:00	2021-04-02 16:00:00	*** Equip 48099588, 161.0 POWESHK IRVINESS, L/D -17/5 - past congestion with other outages as well. may also require Ottumwa crashed on the HS. Also d
+1786	(P) 161.0 POWESHK IRVINESS & 345.0 HILLS DIAMNDBK/DIAMNDBK MNTZUMA on 69.0 NEWSHRN POWESHK	48099588	2020-06-18 06:04:00	2020-09-10 15:00:00	(1) *** 1-25885472, Equip 48099588, 161.0 POWESHK IRVINESS, L/D -17/33. (2) **1-26017334, Equip 48100295, 345.0 DIAMNDBK MNTZUMA & Equip 48100296, 345
+Desk flags and notes on the outages above:
+outage_equipment_id	flag_type	updated_at	notes
+60052771	alert	2026-10-05 13:01:21	Tracking because ME out for [ME 4704 IRVINESS IRVINBEACO16_1 1 <+1>] And drove strong congestion on [ME 3034 NEWSHAR NEWSHPOWES69_1 1 <-1>] (Maybe [ME 22991 NEWSHAR NEWS
+60027961	alert	2026-09-26 01:14:08	Loading 21% FIDi on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>]. Loading 13% FIDi on [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] Loading 8% PSI on [ME 2311
+60027194	alert	2026-09-24 21:27:49	TDT driving significantly increased congestion on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>] and [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] in 2026 Loading 21% FIDi on [ME 834
+60026887	alert	2026-09-20 19:26:39	Triggered congestion on [ME 443 FAIRFAX2 FAIRFARNOL16_1 1 <-1>], but the ongoing [GID 8083, 161.0 ARNOLD DWNTIND] was also likely required (PSI combination was 75% loading
+60026709	alert	2026-09-10 19:38:55	created a red flag due to annotating this for [ME 3895 LAURELSS LAUREJASPE16_1 1 <+1>] -AM, 2025-04-03
+60026711	watch	2026-05-31 01:11:25	[ME 1742 POWESHK POWESREASN16_1 1 <-1>] was 10% loading and contributed to increased congestion when Ottumwa was off. Other outages were OOS during congestion. Loading 10% FIDn on [ME 5381 DOUD2 DOUD2
+
+--- Generator outages and derates in effect (IIR) at plants that matter ---
+None found.
+
+--- Desk notes on monitored element 3034, last 14 days (newest first) ---
+2026-10-05 rt_shadow: *** [GID 10812, 161.0 IRVINESS BEAC_ALT] OOS loading 25% FIDi. This went OOS on 10-05. Good TLU  *** Ottumwa offline on the HS load loading 51%  *** strong AutoFlow; *** strong LSWS-HSWS; *** strong IA wind
+
+=== WARNINGS (some data could not be loaded; results may be incomplete) ===
+No zonal coefficients for MISO constraint 28407 or any constraint with its name. EnergyCore only computes them for constraints in the 'miso' autoflow_constraints parameter.
+78 of 229 SPP outages mapped to MISO branches could not be found in the network model.
+575 of 944 PJM outages mapped to MISO branches could not be found in the network model.
+Some outage combinations split the network model; used single-outage superposition for them.

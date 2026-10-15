@@ -1,0 +1,202 @@
+=== MISO RT CONSTRAINT 25728: NSP11007_LOONLK_LOONLS3811_1_1 (monitored element 515) on 2026-10-05 ===
+
+--- Hourly shadow prices ---
+hr	shadow_price
+18	33
+20	251
+21	144
+22	281
+23	863
+24	931
+Total 2502 over 6 hours.
+
+--- Market conditions: energy prices, our forecasts (as of the day-ahead deadline), stress index ---
+Sources: rtep = tios.rtep.samprf.pm.20250127 (tios_configs tea-config.miso); daep = tios.daep.samprf.pm.20250422 (tios_configs tea-config.miso); flex_daep = flex.daep.20251101 (tios_configs global-config.miso); stress_index = s3://tios-quantforecasts-production/working-data/stress-index/miso/lion-stress-index-v3/miso-stress-index-preview-for-2026-10-05.csv (S3).
+Averages: rt_energy_price 30.8 while binding vs 30.5 otherwise; rtep 43.8 while binding vs 36.3 otherwise; rt_minus_rtep -12.9 while binding vs -5.8 otherwise; stress_level 465.9 while binding vs 340.8 otherwise.
+hr	da_energy_price	rt_energy_price	rtep	rt_minus_rtep	daep	flex_daep	stress_level	miso_reserve_margin_meteo_iso_avg	shadow_price
+1	30.2	29.1	32.7	-3.6	32.4	33.1	310.8	43879.4	
+2	28.9	27.9	32.0	-4.1	31.6	32.4	300.9	45289.4	
+3	28.5	26.2	31.6	-5.3	30.4	31.9	295.2	46101.4	
+4	28.2	29.5	33.0	-3.6	30.6	32.1	293.4	46364.4	
+5	31.3	29.5	36.6	-7.0	32.6	34.8	301.3	45233.9	
+6	44.9	38.8	40.1	-1.3	46.8	42.5	323.1	42121.4	
+7	66.5	55.3	45.9	9.4	60.0	49.6	351.9	38012.9	
+8	49.5	48.3	38.2	10.0	47.9	43.6	343.4	39222.9	
+9	27.5	19.0	27.3	-8.3	30.3	31.4	289.8	46883.4	
+10	23.9	21.7	24.1	-2.4	27.9	25.9	253.4	52073.9	
+11	24.5	23.5	25.3	-1.8	28.2	25.8	249.3	52665.4	
+12	24.8	24.6	24.7	-0.1	28.2	26.1	248.7	52741.9	
+13	24.6	24.3	27.4	-3.2	29.4	26.2	252.5	52208.4	
+14	25.8	25.2	26.4	-1.2	30.5	25.9	254.9	51859.4	
+15	27.2	24.4	28.9	-4.5	33.8	26.5	257.0	51563.4	
+16	27.9	22.9	29.4	-6.4	34.6	27.7	261.3	50948.9	
+17	40.9	26.6	34.9	-8.3	41.4	37.2	468.8	47845.4	
+18	95.6	42.4	68.3	-25.9	72.5	67.7	1070.6	39801.9	32.7
+19	182.7	51.8	114.5	-62.7	87.9	122.8	1078.5	33356.9	
+20	68.1	31.4	60.0	-28.6	65.8	69.5	493.7	34060.9	250.6
+21	48.3	31.6	46.4	-14.8	47.2	46.2	355.6	37483.9	143.8
+22	42.3	27.7	35.3	-7.6	33.9	34.9	323.9	42006.4	281.0
+23	35.6	26.4	27.7	-1.4	31.0	28.4	289.9	46865.4	863.2
+24	33.1	25.5	24.8	0.7	27.5	25.3	261.6	50909.9	931.0
+
+--- Generator impacts, HE19 -> HE24 (auto) ---
+load_mw = -sf * d_mw: + loads the constraint, - relieves it. sf < 0 means more output loads it.
+Factor set: rt-matrix, fit at 2026-10-06 00:00, updated 2026-10-08 11:42.
+Net from 33 mapped plants: -4 MW (solar +0, other -4; excluding possible redispatch -3).
+name	fuel	sf	base_mw	compare_mw	d_mw	load_mw	possible_redispatch	sources	disagreement
+Oak Glen Wind Farm (1)	Wind	+0.258	7	27	20	-5		muse,gs,meteologica	
+Odell Wind Farm (1)	Wind	-0.035	84	8	-76	-3		muse,gs,meteologica	muse -76 / gs -83 / meteologica +43
+Highland Wind Project (IA) (HLWF, HLWF2, HLWF3, HLWF4, HLWF5	Wind	-0.021	290	182	-107	-2		muse,gs,meteologica	muse -66 / gs -36 / meteologica +25 / lpi -22
+Palo Alto Wind Farm (PAWF, PAWF2)	Wind	-0.024	186	248	62	1		muse,meteologica	muse +20 / meteologica +104
+Whispering Willow North (1)	Wind	-0.020	30	95	65	1		muse,meteologica	muse +7 / meteologica +124 / lpi -3
+Mankato Energy Center (CTG1, CTG2, STG1)	Natural Gas	-0.053	19	43	24	1		muse	
+Kossuth (1), Kossuth County Wind (KCW)	Wind	-0.021	114	163	49	1		muse,meteologica	muse +11 / meteologica +63
+Lakefield Wind Project LLC (LAKE1)	Wind	-0.031	61	26	-25	-1		muse,gs,meteologica	muse -53 / gs -25 / meteologica +2
+Lakefield Junction (1, 2, 3, 4, 5, 6)	Natural Gas	-0.034	55	33	-22	-1	yes	muse,gs	
+Upland Prairie (1)	Wind	-0.024	168	191	23	1		muse,meteologica	muse -23 / meteologica +69 / lpi +14
+Elm Creek Wind II LLC (1), Elm Creek Wind LLC (1), Trimont A	Wind	-0.034	101	67	-14	-0		muse,gs,meteologica	muse -17 / gs -7 / meteologica +32; muse -17 / gs -7 / meteologica +22
+Plymouth Wind (65003)	Wind	-0.022	160	181	21	0		muse,meteologica	muse +15 / meteologica +27 / lpi +0
+Golden Plains (1), Ledyard Windpower, LLC (LDYRD)	Wind	-0.026	171	186	15	0		muse,meteologica,gs	muse -11 / meteologica +65; muse -11 / gs -16 / meteologica +67
+Lawrence Co.	Gas	-0.028	16	4	-12	-0	yes	lpi	
+SPP - Osceola Windpower LLC (56645)	wind-farm	-0.022	52	67	15	0		meteologica	
+
+--- Zonal load, HE19 -> HE24 ---
+zone	base_mw	compare_mw	d_mw
+MISO	82568	68516	-14052
+Central	38600	31613	-6987
+LRZ8_9_10	25224	20757	-4468
+South	25224	20757	-4468
+LRZ2_7	18604	15360	-3243
+North	18744	16146	-2598
+LRZ3_5	11276	9363	-1913
+LRZ6	10654	8768	-1886
+LRZ1	11611	9904	-1706
+LRZ4	5199	4363	-836
+
+--- Autoflow (pseudo_actuals) ---
+Coefficients from constraint 25728, computed 2026-10-08 00:01; 82 of 95 zones have data (pseudo_actuals, meteologica). + MW loads the constraint, - relieves it. For hours that have not happened yet, pseudo actuals are the latest forecast.
+hr	autoflow	solar	wind	load	shadow_price
+1	39	0	22	17	
+2	40	0	23	17	
+3	41	0	24	17	
+4	45	0	26	19	
+5	50	0	27	22	
+6	56	0	29	28	
+7	61	-0	31	31	
+8	61	-3	32	31	
+9	57	-7	33	30	
+10	52	-8	32	28	
+11	48	-8	31	25	
+12	45	-8	29	23	
+13	48	-8	34	22	
+14	50	-8	39	19	
+15	49	-8	40	17	
+16	48	-7	38	18	
+17	55	-4	41	18	
+18	62	0	43	20	33
+19	73	1	48	23	
+20	77	0	53	24	251
+21	86	0	64	23	144
+22	91	0	70	21	281
+23	94	0	75	19	863
+24	97	0	78	19	931
+Change HE19 -> HE24: +25 MW.
+Zones that moved most, HE19 -> HE24:
+coefficient_type	iso	zone	coefficient	base_mw	compare_mw	d_leverage
+wind	miso	Meteologica_North_Iowa	+0.0035	4001.0	7748.0	13.1
+wind	spp	Meteologica_Reserve-Zone-4	+0.0020	1169.0	5773.0	9.3
+wind	spp	Meteologica_Reserve-Zone-2	+0.0024	2303.0	4555.0	5.5
+load	miso	LRZ2_7	+0.0014	18581.0	15477.0	-4.2
+load	pjm	MIDATL	+0.0005	29337.0	22126.0	-3.4
+load	miso	LRZ8_9_10	-0.0007	24989.0	20864.0	2.8
+load	miso	LRZ1	+0.0014	11584.0	9892.0	-2.4
+load	spp	CSWS	-0.0014	6377.0	4703.0	2.3
+
+--- Transmission outage impacts (network model; outages in effect HE18-HE24) ---
+Case 2026-03-01: monitored LOON LK7 - LOONLKTP 1 (branch 59618); contingency W_FARIB28799 - W FARIB7 Z, W_FARIB28799 - LOONLKTP 1, WFARBLT8 - W_FARIB28799 1.
+Limit: 102 MW from PowerWorld case 2026-03-01 limit.
+Flow in the binding direction (from monitored element name): base case 54 MW, after the contingency 61 MW (60% of limit), plus all significant outages 32 MW (32% of limit). (The case is a fixed snapshot, not today's dispatch.)
+17222 outages in effect, 2861 mapped to the model, 14 with a possible impact of at least 1 MW. individual = this outage alone; in_combination = what it adds on top of the others. + loads the constraint.
+market	outage_equipment_id	name	in_active	request_status	start	end	pre_ctg_lodf_pct	individual_mw	individual_pct	in_combination_mw	in_combination_pct	check
+miso	60021450	69 LAWRENC TR7	yes	active table only	2025-02-03 09:45		100.0	-61.2	-60.1	-54.0	-53.0	
+miso	60022294	345.0 SHEASLK WILMART / 345 SHEASLK WILMART SHEASWILMA34_1	yes	Completed, active table only	2026-07-21 07:46	2026-10-07 07:08	1.2	8.6	8.4	2.9	2.9	
+miso	60027194	345.0 BLKHAWK QUINN / 345 BLKHAWK QUINN BLKHAQUINN34_1	yes	Implemented, active table only	2026-09-23 09:40	2026-10-16 15:00	0.1	5.5	5.4	0.9	0.9	
+miso	60027961	345 KILLDEER QUINN KILLDQUINN34_1	yes	active table only	2026-09-23 09:40	2026-10-06 09:41	0.1	5.2	5.1	0.8	0.8	
+miso	7932	345.0 EAU_CLA KING		Proposed	2026-09-27 08:00	2026-10-15 16:00	0.3	2.8	2.7	2.7	2.7	
+miso	60026887	345.0 ARNOLD MRGNVLY / 345 ARNOLD MRGNVLY ARNOLMRGNV34_1	yes	Implemented, active table only	2026-08-21 07:08	2026-11-02 16:00	0.1	-2.6	-2.6	-1.8	-1.7	
+miso	60023770	69 MATAWAN DANVILL2 MATAWDANVI69_1	yes	active table only	2026-06-01 10:05		15.7	2.3	2.3	2.0	1.9	
+miso	60059475	345 BLUEBILL COLBY BLUEBCOLBY / 345.0 BLUEBILL COLBY	yes	active table only, Implemented	2025-02-14 18:10	2027-10-25 16:00	0.3	1.9	1.9	-0.0	-0.0	
+miso	60020656	69 MONTALTW MNTGMRY MONTAMNTGM69_1	yes	active table only	2025-11-25 09:56		6.0	1.8	1.8	1.6	1.6	
+miso	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	yes	active table only	2026-10-05 20:12	2026-10-05 23:56	0.1	1.7	1.7	0.8	0.8	
+miso	60059474	345 BISONSS BLUEBILL BISONBLUEB34_1	yes	active table only	2025-02-14 18:10		0.3	1.7	1.7	-0.1	-0.1	
+miso	60020498	230 ARROWHD SQBUTTE MP_ARR_SQB_DCL	yes	active table only	2023-11-15 18:08		0.1	1.6	1.6	0.8	0.7	
+
+--- Timing: 5-minute shadow prices and active-table outage changes ---
+Binding spells: 17:40-17:40 ($392); 19:00-23:55 ($29,637)
+79 active-table changes from 2026-10-05 15:40 to 2026-10-06 00:25 (the table updates every 15 minutes, so times are approximate). Showing outages with a modeled impact, and unmapped lines/transformers of 100 kV and up whose timing lines up with a price change.
+time	event	outage_equipment_id	name	before	after	lines_up	impact
+2026-10-05 16:11	back	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	0	0		yes
+2026-10-05 20:12	out	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	118	152		yes
+2026-10-05 23:56	back	60025576	230 ARROWHD ARROWHD ARROWHD_P1AC	1000	0	yes	yes
+
+--- EnergyCore outage matching and desk outage notes (monitored element 515) ---
+Outage annotations on this element (newest first):
+annotation_id	name	outage_equipment_id	start_dt	stop_dt	notes
+4397	345.0 SHEASLK WILMART on [515] LOONLK LOONLS3811_1 1 <-1>	39056396	2026-07-21 08:18:00	2026-10-09 17:00:00	\* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW. *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi. *** stron
+4119	115.0 W_FARIB S38 on LOONLK LOONLS3811_1 1	17774	2026-02-04 13:37:00	2026-02-05 11:44:00	*** GID 3423, 115.0 W_FARIB S38 loading ~ 69% FIDi - prior contingency - congestion stopped as the outage ended in Active table. ** HS gens: High Brid
+Desk flags and notes on the outages above:
+outage_equipment_id	flag_type	updated_at	notes
+60022294		2026-10-02 02:05:08	Very relieving on [ME 5639 CHUB_LK TR1 TR1_2] & [ME 5644 CHUB_LK TR1 TR1_1] ~ 18%/28% respectively. Prior contingency for [ME 834 LIME_CK LIME_BARTO16_1 1](https://energ
+60060118	alert	2026-10-01 13:58:49	shielding on [ME 5639 CHUB_LK TR1 TR1_2 <-1>] (and a few other MEs in the area) Annotated for [ME 6291 SCOTTCO SCOTTSCOTT11_1 1] - CB Annotatetd for [ME 27403 WAKEFLD W
+60023438	alert	2026-09-30 19:48:24	Loads ME 1454 8%- CS - Noted as nearly equivalent to [GID 988, 345.0 SPLT_RT NOBLES] Loading 15% FIDi on [ME 5513 SIOUXCY V1A1 KV1A1 <+1>] Loading 9% FIDi on
+60027961	alert	2026-09-26 01:14:08	Loading 21% FIDi on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>]. Loading 13% FIDi on [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] Loading 8% PSI on [ME 2311
+7932	alert	2026-09-25 20:20:53	13% loading for [7MILECRK X-159 1] - spec [ME 1063 ALMA2 ALMAWABAC16_1 1 <-1>] - probably spec [ME 2514 ARROWHD ARROWHDTIE 1 <+1>; EAU_CLA EAU_CKING34_1 1 <-1>](https:/
+60027194	alert	2026-09-24 21:27:49	TDT driving significantly increased congestion on [ME 834 LIME_CK LIME_BARTO16_1 1 <+1>] and [ME 3099 MURPHYCR MURPHHAYWA16_1 1 <-1>] in 2026 Loading 21% FIDi on [ME 834
+60026887	auto_watch	2026-09-20 19:26:39	Triggered congestion on [ME 443 FAIRFAX2 FAIRFARNOL16_1 1 <-1>], but the ongoing [GID 8083, 161.0 ARNOLD DWNTIND] was also likely required (PSI combination was 75% loading
+60020498	auto_alert	2025-12-08 00:00:05	was in Actuals table for a very long time, caused increased congestion on many constraint in ND & MN -AM
+7932	auto_watch	2020-02-06 17:26:45	Multiple outages caused congestion last time. Watch.
+
+--- Generator outages and derates in effect (IIR) at plants that matter ---
+load_mw = sf * capacity offline: the flow added if the unit would otherwise have run. + loads the constraint.
+unit_name	prim_fuel	capacity_offline	sf	load_mw	outage_type	status	start	end	comments
+Cascade Creek 02 CT	Natural Gas	50	+0.027	1	Planned	Future	2026-10-02	2026-10-31	Major Turbine Inspection
+
+--- Desk notes on monitored element 515, last 14 days (newest first) ---
+2026-10-05 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%; *** Prairie Island lower loading ~ 12% (IIR outage)  *** strong LSWS/LSWS-HSWS
+2026-10-04 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  *** Prairie Island ramped down on the HS and is additionally loading ~ 12% (IIR outage)  *** strong LSWS/LSWS-HSWS
+2026-10-04 rt_shadow_forecast: NSC to yeaterdays approach, which did well  I missed accounting for Prairie Island here, which turned off on the HS. Should have added that to models as I think the models would have been able to pick up on the relationship.   Accounting for this would have made us higher, and I did forecast higher than DA here already 
+2026-10-03 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  Yesterday, *** prairie island ramped down on the HS and is additionally loading ~ 12%  *** strong LSWS/LSWS-HSWS; *** weak North+MN stress; *** strong AutoFlow
+2026-10-03 rt_shadow: f
+2026-10-03 rt_shadow_forecast: Added a since 345.0 KILLDEER QUINN started RF, but overall no changes to Jacks approach. Strong wind delta tomorrow morning / afternoon
+2026-10-02 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  *** strong LSWS/LSWS-HSWS; *** weak North+MN stress; *** strong AutoFlow
+2026-10-02 rt_shadow: f
+2026-10-02 da_shadow: long BOD; not very exposed rest of day
+2026-10-02 rt_shadow_forecast: NSC  Reflecting on this, allocating 100% of shaping weight to the loess seems a bit too aggressive here. Since the RFs also train on LSWS-HSWS, I'm not sure I can justify adding shaping weight to a model we already have allocation weight on. Would probably be a good idea to remove going forward
+2026-10-01 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  *** strong LSWS/LSWS-HSWS; *** weak North+MN stress; *** strong AutoFlow
+2026-10-01 da_shadow: long 1OD
+2026-10-01 rt_shadow_forecast: Adding 100% shaping weight to our LSWS-HSWS loess model to shape more aggressively which has been an issue here over the past few days
+2026-09-30 rt_shadow_forecast: Added 161.0 COLBY WORT 4% loader DV to RF models. Stayed on our loess not accounting for the 4% loader because I felt the shaping was more important than the loader. I also didn't spend a lot of time here given t+1 conditions
+2026-09-29 da_shadow: long
+2026-09-29 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  *** strong LSWS/LSWS-HSWS; *** weak N stress; ** AutoFlow is starting to look decent here for recent bouts of congestion
+2026-09-29 rt_shadow_forecast: All the RFs were giving the same total value (around $6800), however, the shaping is pretty flat throughout the day. Decided to blend in a short-term loess model looking solely at LSWS-HSWS (N/MN stress didn't add much value). This made us shape more aggressively around HE 8 when wind is the strongest. Still left majority of weight allocated to the RFs due to better metrics and because they still gave value in overnight hours
+2026-09-28 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  *** strong LSWS/LSWS-HSWS; *** weak N stress; ** AutoFlow is starting to look decent here for recent bouts of congestion
+2026-09-27 rt_shadow_forecast: NSC
+2026-09-26 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  AutoFlow doesn't look great here (including AutoPush Product and AutoPush, and variations like HS/LS stress). N stress and GREGN/Minneapolis vars aren't great either. Best var we have is *** LSWS/LSWS-HSWS
+2026-09-26 da_shadow: long
+2026-09-26 rt_shadow_forecast: Added a "since congestion (2026-07-25+)" RF to pull in more data since our main RF we've been using was very high. Longer-term RF had a similar value overall   Moved away from the "since 345.0 NROCH PR_ISLD ended" lookback models since these hadn't seen LSWS-HSWS this bullish and I wanted to pull in more data so they had some idea of what to do. This did force me to use a linear with DVs instead of a loess but I felt that was fine since majority of weight was on RFs anyways
+2026-09-25 da_shadow: no very exposed
+2026-09-25 rt_shadow_forecast: Added 345.0 KILLDEER QUINN as a DV to our RF. I would have also added 345.0 BLKHAWK QUINN but that outage started at the same time so I can't. Making note to add 345.0 BLKHAWK QUINN too if they end at different times
+2026-09-25 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.   ** [GID 12935, 345.0 BLKHAWK QUINN] and ** [GID 12936, 345.0 KILLDEER QUINN] are both OOS and additionally loading here as well, but cumulative effects are <5% FIDn. Not annotating, but these outages are DV'd in this group  *** Sherburne County running lower loads ~8%. While this doesn't change frequently, the changes its had seem important. *** High Bridge running lower loads 5% (same story as Sherburne County despite being a NG gen)  AutoFlow doesn't look great here (including AutoPush Product and AutoPush, and variations like HS/LS stress). N stress and GREGN/Minneapolis vars aren't great either. Best var we have is *** LSWS
+2026-09-24 da_shadow: long 1OD
+2026-09-24 rt_shadow_forecast: NSC - the "since 345.0 NROCH PR_ISLD ended" models were rolling so the lookback did not match the name. I fixed these models and reallocated weight to them
+2026-09-23 rt_shadow: \* NSP constraint with a line limit decrease on November 10th from 142 MW to 102 MW.  *** [GID 7009, 345.0 SHEASLK WILMART] loading 35% FIDi.  *** strong AutoFlow; *** strong LSWS-HSWS; * moderate temps in Rochester MN
+2026-09-23 da_shadow: short
+2026-09-23 rt_shadow_forecast: Added more variables to our 1mo RF as we had more space to do so. Remaining weight is looking at LSWS-HSWS which is very bullish EOD as IA wind picks up
+(3 older notes omitted; raise max_notes to see them.)
+
+=== WARNINGS (some data could not be loaded; results may be incomplete) ===
+No pseudo-actual cache for spa_meteologica_load_forecast_snapshots in 2026-10; those zones are left out for that month.
+Autoflow zones left out: blkw load (1 zones, no data table); eddy load (1 zones, no data table); lamar load (1 zones, no data table); mh_ont load (1 zones, no data table); mheb load (1 zones, no data table); mp_ont load (1 zones, no data table); ont_mh load (1 zones, no data table); spa load (1 zones, no data for these hours); spc load (1 zones, no data table); spc_wa load (1 zones, no data table); wa_spc load (1 zones, no data table); yad load (1 zones, no data table); mheb wind (1 zones, no data table).
+79 of 233 SPP outages mapped to MISO branches could not be found in the network model.
+575 of 944 PJM outages mapped to MISO branches could not be found in the network model.
+Some outage combinations split the network model; used single-outage superposition for them.

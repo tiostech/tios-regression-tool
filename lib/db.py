@@ -20,6 +20,11 @@ The password is resolved in three steps, first hit wins:
 That means nobody on a server ever sees a password box, and local dev still
 works with the password left blank in the YAML.
 
+Where there is no config/mysql.yml at all -- the Claude Desktop bundle, which
+must not ship credentials -- the other settings come from ``TIOS_DB_USERNAME``,
+``TIOS_DB_HOST``, ``TIOS_DB_PORT`` and ``TIOS_DB_DATABASE``. When both exist,
+the YAML wins, the same as for the password.
+
 A blank password is a valid answer at every step -- local MySQL accounts often
 have none. So "not supplied" is represented by ``None`` and "supplied, empty" by
 ``""``, and the sidebar prompt uses a Connect button so an empty box submitted
@@ -46,6 +51,14 @@ _SUBMITTED_KEY = "db_password_submitted"
 
 PASSWORD_ENV_VAR = "TIOS_DB_PASSWORD"
 
+# Fallbacks for config/mysql.yml keys the file does not supply.
+SETTING_ENV_VARS = {
+    "username": "TIOS_DB_USERNAME",
+    "host": "TIOS_DB_HOST",
+    "port": "TIOS_DB_PORT",
+    "database": "TIOS_DB_DATABASE",
+}
+
 DEFAULTS = {
     "host": "127.0.0.1",
     "port": 3309,
@@ -64,7 +77,8 @@ def config_path():
 
 def load_mysql_config():
     """
-    Returns the ``mysql_slave`` block from config/mysql.yml.
+    Returns the ``mysql_slave`` block from config/mysql.yml, with any keys it
+    lacks filled from the TIOS_DB_* environment variables.
 
     Expected structure:
         mysql_slave:
@@ -74,25 +88,34 @@ def load_mysql_config():
           username: <user>
           password: <pass>     # may be blank for local dev
 
-    Raises ConfigError -- with a message worth showing to a user -- if the file
-    is missing, malformed, or has no username.
+    The file is optional if TIOS_DB_USERNAME is set. Raises ConfigError -- with
+    a message worth showing to a user -- if the file is malformed, or if neither
+    it nor the environment gives a username.
     """
     path = config_path()
+    cfg = {}
 
-    if not os.path.exists(path):
-        raise ConfigError(
-            f"Config file not found at {path}. Copy config/mysql.yml.sample to "
-            "config/mysql.yml and fill in the connection settings."
-        )
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            raise ConfigError(f"Could not parse {path}: {e}")
+        cfg = dict(data.get("mysql_slave") or {})
 
-    try:
-        with open(path, "r") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception as e:
-        raise ConfigError(f"Could not parse {path}: {e}")
+    # Empty strings count as unset: Claude Desktop passes "" for optional fields
+    # left blank. The password is handled separately because blank is meaningful.
+    for key, var in SETTING_ENV_VARS.items():
+        if not cfg.get(key) and os.environ.get(var):
+            cfg[key] = os.environ[var]
 
-    cfg = data.get("mysql_slave") or {}
     if not cfg.get("username"):
+        if not os.path.exists(path):
+            raise ConfigError(
+                f"Config file not found at {path}. Copy config/mysql.yml.sample to "
+                f"config/mysql.yml and fill in the connection settings, or set "
+                f"{SETTING_ENV_VARS['username']}."
+            )
         raise ConfigError(f"{path} is missing mysql_slave: username.")
 
     return cfg
@@ -104,7 +127,7 @@ def settings():
     return (
         cfg["username"],
         cfg.get("host") or DEFAULTS["host"],
-        cfg.get("port") or DEFAULTS["port"],
+        int(cfg.get("port") or DEFAULTS["port"]),
         cfg.get("database") or DEFAULTS["database"],
     )
 

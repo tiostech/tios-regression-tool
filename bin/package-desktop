@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Build dist/energycore-outages.mcpb, the MCP server as a Claude Desktop extension.
+#
+# Install it by double-clicking the file (or Settings > Extensions > Install
+# Extension in Claude Desktop), then enter your database username and password.
+#
+# Files are copied into the bundle from an allowlist, so config/mysql.yml and
+# anything else with credentials can never end up in it.
+set -e
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+OUT="dist/energycore-outages.mcpb"
+
+if command -v mcpb >/dev/null 2>&1; then
+  MCPB=(mcpb)
+else
+  MCPB=(npx -y @anthropic-ai/mcpb)
+fi
+
+echo "Staging bundle in $STAGE..."
+cp packaging/claude-desktop/manifest.json packaging/claude-desktop/pyproject.toml "$STAGE/"
+cp .python-version mcp_server.py "$STAGE/"
+mkdir -p "$STAGE/lib" "$STAGE/prompts"
+cp lib/*.py "$STAGE/lib/"
+cp prompts/outage_briefing.md prompts/binding_drivers.md "$STAGE/prompts/"
+
+# Pin the dependency versions inside the bundle so every install gets the same set.
+if command -v uv >/dev/null 2>&1; then
+  (cd "$STAGE" && uv lock --quiet)
+else
+  echo "⚠ uv not found; packaging without uv.lock (installs will resolve latest versions)."
+fi
+
+"${MCPB[@]}" validate "$STAGE/manifest.json"
+mkdir -p dist
+"${MCPB[@]}" pack "$STAGE" "$OUT"
+
+echo ""
+echo "Built $OUT"
+echo "Install: open it with Claude Desktop (double-click, or Settings > Extensions > Install Extension)."
