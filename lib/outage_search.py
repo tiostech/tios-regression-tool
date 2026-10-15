@@ -15,6 +15,8 @@ import re
 import pandas as pd
 from sqlalchemy import text
 
+from lib import links
+
 MARKETS = ["miso", "spp", "pjm", "ercot", "caiso"]
 SEARCH_TYPES = ["Equipment ID", "Group ID", "Manual string"]
 CONTEXT_OPTIONS = ["All", "rt_shadow", "rt_shadow_forecast", "da_shadow"]
@@ -786,7 +788,7 @@ def group_by_monitored_element(engine, df: pd.DataFrame, annotations: list[dict]
 
 
 def monitored_element_url(current_market: str, me_id: str) -> str:
-    return f"https://energycore.tioscapital.com/{current_market.lower()}/monitored_elements/{me_id}"
+    return links.monitored_element(current_market, me_id)
 
 
 def shadow_snippets(me_groups: list[dict], search_fields: list[str], current_market: str) -> list[str]:
@@ -824,8 +826,10 @@ def shadow_snippets(me_groups: list[dict], search_fields: list[str], current_mar
 
 
 def clipboard_text(current_market: str, search_fields: list[str], outage_names: list[str], flag_notes: list[dict],
-                   me_groups: list[dict], df: pd.DataFrame, meta_descriptions: dict[str, str]) -> str:
-    """The tab-separated "Copy Full Output to Clipboard" text block."""
+                   me_groups: list[dict], df: pd.DataFrame, meta_descriptions: dict[str, str],
+                   link_names: bool = False) -> str:
+    """The tab-separated "Copy Full Output to Clipboard" text block. ``link_names`` makes the
+    monitored element names markdown links to their EnergyCore pages (for the MCP server)."""
     clipboard_parts = [
         f"Current Market: {current_market.upper()}",
         f"Match Fields: {', '.join(search_fields)}"
@@ -877,6 +881,7 @@ def clipboard_text(current_market: str, search_fields: list[str], outage_names: 
     clipboard_parts.append("Monitored Element ID\tMonitored Element Name\tDescription")
     for g in me_groups:
         me_desc = meta_descriptions.get(g['me_id'], "")
-        clipboard_parts.append(f"{g['me_id']}\t{g['me_name']}\t{me_desc}")
+        me_name = links.md(g['me_name'], monitored_element_url(current_market, g['me_id'])) if link_names else g['me_name']
+        clipboard_parts.append(f"{g['me_id']}\t{me_name}\t{me_desc}")
 
     return "\n".join(clipboard_parts)

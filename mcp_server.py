@@ -20,10 +20,14 @@ from mcp.types import ToolAnnotations
 from lib import autoflow
 from lib import constraint_drivers as drivers
 from lib import db
+from lib import forecast_models
+from lib import links
 from lib import market_conditions
+from lib import monitored_elements
 from lib import network
 from lib import outage_impacts
 from lib import outage_search as osearch
+from lib import shadow_forecasts
 from lib import upcoming_outages
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -54,13 +58,20 @@ server = MCPServer(
         "list_binding_constraints, then get_constraint_drivers for the constraints of interest; the "
         "binding_drivers prompt holds the instructions. These analysis tools default to two days ago, the latest day "
         "with complete data. get_market_conditions gives energy prices, RTEP, and the stress index; "
-        "get_autoflow gives autoflow over a date range, and "
-        "get_outage_impacts checks outages (including planned ones on future days) against a constraint."
+        "get_autoflow gives autoflow over a date range; get_shadow_forecasts gives the desk's RT shadow price "
+        "forecasts for a day, get_forecast_model shows the models and features behind a constraint's forecast, "
+        "and get_forecast_accuracy scores the forecasts against actuals over a date range; "
+        "get_outage_impacts checks outages (including planned ones on future days) against a constraint. "
+        "Constraint, monitored element, and outage names in the output are often markdown links to their "
+        "EnergyCore pages; keep those links when you mention them in your answer. get_monitored_element gives an "
+        "element's description and the elements it is linked to, often the same line in another market under a "
+        "different name; check it before saying a constraint is not shared with another market."
     ),
 )
 
 _engine = None
 _notes_cache = {}
+_link_graph_cache = None
 
 
 def engine():
@@ -77,6 +88,14 @@ def market_notes(market: str) -> pd.DataFrame:
         loaded = (time.time(), osearch.load_market_notes(engine(), market))
         _notes_cache[market] = loaded
     return loaded[1]
+
+
+def _link_graph() -> dict:
+    """Links between monitored elements from every market's descriptions, reloaded after NOTES_CACHE_SECONDS."""
+    global _link_graph_cache
+    if _link_graph_cache is None or time.time() - _link_graph_cache[0] > NOTES_CACHE_SECONDS:
+        _link_graph_cache = (time.time(), monitored_elements.link_graph(engine()))
+    return _link_graph_cache[1]
 
 
 def _check_choice(name: str, value: str, choices) -> None:
@@ -150,9 +169,11 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
     lines += ["", "\t".join(header)]
 
     for o in outages:
-        row = [o["outage_equipment_id"], o["name"], o["equipment_type"], "" if o["kv"] is None else str(o["kv"]),
+        groups = [links.md(g, links.outage_group(market, g)) if market == "miso" else g for g in o["group_ids"]]
+        row = [o["outage_equipment_id"], links.md(o["name"], links.outage(market, o["outage_equipment_id"])),
+               o["equipment_type"], "" if o["kv"] is None else str(o["kv"]),
                _fmt_dt(o["planned_start"]), _fmt_dt(o["planned_end"]), ", ".join(o["request_statuses"]),
-               ", ".join(str(r) for r in o["request_ids"]), ", ".join(o["group_ids"])]
+               ", ".join(str(r) for r in o["request_ids"]), ", ".join(groups)]
         if check_history:
             row += [str(o["note_matches"]), str(o["annotations"]), o["flag_type"]]
         lines.append("\t".join(row))
@@ -219,8 +240,11 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     if max_notes_per_element and not df.empty:
         df_shown = df.groupby('official_monitored_element_id', sort=False).head(max_notes_per_element)
 
-    lines = [osearch.clipboard_text(notes_market, search_fields, outage_names, flag_notes, me_groups, df_shown,
-                                    meta_descriptions)]
+    lines = []
+    if raw_eq_ids:
+        lines.append("EnergyCore outage search: " + ", ".join(links.md(e, links.outage(market, e)) for e in raw_eq_ids))
+    lines.append(osearch.clipboard_text(notes_market, search_fields, outage_names, flag_notes, me_groups, df_shown,
+                                        meta_descriptions, link_names=True))
     if len(df_shown) < len(df):
         lines.append(f"(Showing the newest {max_notes_per_element} notes per monitored element: "
                      f"{len(df) - len(df_shown)} of {len(df)} matching notes omitted.)")
@@ -267,12 +291,17 @@ def list_binding_constraints(market: str, date: str | None = None, kind: str = "
         return f"No {kind.upper()} shadow prices for {market.upper()} on {day}."
     hist = drivers.binding_history(eng, market, df["me_id"].tolist(), day, kind)
     df = df.merge(hist, on="me_id", how="left")
+    df["linked"] = [monitored_elements.short_links(_link_graph(), market, m) for m in df["me_id"]]
+    df["name"] = [links.md(n, links.constraint(market, c, day)) for n, c in zip(df["name"], df["constraint_id"])]
+    df["me_id"] = [links.md(m, links.monitored_element(market, m)) for m in df["me_id"]]
 
     lines = [f"{market.upper()} {kind.upper()} binding constraints on {day}"
              + (" (includes preliminary prices)" if df["preliminary"].fillna(0).any() else ""),
-             "History columns cover the 3 years before this day; total_30d is the 30 days before it.", ""]
+             "History columns cover the 3 years before this day; total_30d is the 30 days before it. linked = "
+             "elements the desk's descriptions link to (often the same line in another market; see "
+             "get_monitored_element).", ""]
     lines += _tsv(df, ["constraint_id", "me_id", "name", "total", "hours", "first_hr", "last_hr", "peak_hr", "peak",
-                       "total_30d", "days_bound", "max_day", "last_bound"])
+                       "total_30d", "days_bound", "max_day", "last_bound", "linked"])
     return "\n".join(lines)
 
 
@@ -331,6 +360,454 @@ def get_market_conditions(market: str, date: str | None = None, forecasts: str |
     lines = [f"=== {market.upper()} market conditions on {day} ==="]
     lines += _market_conditions_section(engine(), market, day, None, warnings, forecast_names=names)[1:]
     return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+def get_shadow_forecasts(market: str, constraint_id: int | None = None, date: str | None = None, days_ahead: int = 1,
+                         limit: int = 25) -> str:
+    """The desk's RT shadow price forecasts for a day, with actual RT shadow prices where the
+    day has happened.
+
+    The forecast that counts (forecast) is the manual one if a trader set it, else the custom
+    one, else the default model forecast; a manual 0 zeroes out the model. Forecasts are
+    expected values ($/MWh per hour), so they spread small amounts over many hours.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        constraint_id: One RT constraint, for its hourly forecast components next to actuals.
+            Omit to list the day's constraints by forecast total.
+        date: The day, YYYY-MM-DD.
+        days_ahead: Days from today when date is not given (1 = tomorrow, -2 = the latest day
+            with complete actuals).
+        limit: Most constraints to list when constraint_id is omitted.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    day = _resolve_date(date, days_ahead)
+    df = shadow_forecasts.hourly(engine(), market, day, day, [constraint_id] if constraint_id else None)
+    if df.empty:
+        return f"No RT shadow price forecasts or actuals for {market.upper()} on {day}."
+    prelim = " (actuals include preliminary prices)" if df["preliminary"].any() else ""
+
+    if constraint_id:
+        name = next((n for n in df["name"] if n), "")
+        me_id = df["me_id"].dropna().iloc[0] if df["me_id"].notna().any() else None
+        lines = [f"=== {market.upper()} RT {_constraint_title(market, constraint_id, name, me_id, day)} on {day}{prelim} ===",
+                 f"Forecast total {df['forecast'].sum():.0f}, actual total {df['actual'].sum():.0f}."]
+        if not df["has_forecast"].any():
+            lines.append("No forecast row for this constraint ID; the element may be forecast under another ID "
+                         "(see get_forecast_accuracy with by=element).")
+        lines += [""] + _tsv(df.sort_values("hr"), ["hr"] + shadow_forecasts.FORECAST_COLUMNS + ["actual"], decimals=1)
+        return "\n".join(lines)
+
+    totals = (df.groupby("constraint_id")
+              .agg(me_id=("me_id", "first"), name=("name", "first"), element=("element", "first"),
+                   forecast_total=("forecast", "sum"), forecast_peak=("forecast", "max"),
+                   manual_hours=("manual_fc", lambda s: int(s.notna().sum())), actual_total=("actual", "sum"),
+                   has_forecast=("has_forecast", "any"))
+              .reset_index())
+    totals["name"] = totals["name"].where(totals["name"] != "", totals["element"])
+    totals["peak_hr"] = totals["constraint_id"].map(
+        df.loc[df.groupby("constraint_id")["forecast"].idxmax()].set_index("constraint_id")["hr"])
+    has_actuals = totals["actual_total"].sum() > 0
+
+    def link_names(t: pd.DataFrame) -> pd.DataFrame:
+        t = t.copy()
+        t["name"] = [links.md(n, links.constraint(market, c, day)) for n, c in zip(t["name"], t["constraint_id"])]
+        return t
+    shown = totals[totals["forecast_total"] > 0].sort_values("forecast_total", ascending=False).head(limit)
+    lines = [f"=== {market.upper()} RT shadow price forecasts on {day}{prelim} ===",
+             f"{int((totals['forecast_total'] > 0).sum())} constraints with a nonzero forecast, total "
+             f"{totals['forecast_total'].sum():.0f}" + (f"; actual total {totals['actual_total'].sum():.0f}." if has_actuals
+                                                        else "; no actuals yet."),
+             "manual_hours = hours where a trader set the forecast by hand.", ""]
+    cols = ["constraint_id", "me_id", "name", "forecast_total", "peak_hr", "forecast_peak", "manual_hours"]
+    lines += _tsv(link_names(_short(shown, "name")), cols + (["actual_total"] if has_actuals else []))
+    if has_actuals:
+        missed = totals[~totals["has_forecast"] & (totals["actual_total"] > 0)].sort_values("actual_total", ascending=False)
+        if not missed.empty:
+            lines += ["", "--- Bound with no forecast row for that constraint ID ---"]
+            lines += _tsv(link_names(_short(missed.head(limit), "name")), ["constraint_id", "me_id", "name", "actual_total"])
+    return "\n".join(lines)
+
+
+@server.tool(annotations=READ_ONLY)
+def get_forecast_accuracy(market: str, start_date: str | None = None, end_date: str | None = None, by: str = "element",
+                          min_total: float = 1000, limit: int = 15) -> str:
+    """How well the desk's RT shadow price forecasts did over a date range: the biggest misses,
+    the best forecasts, and constraints that bound with no forecast at all.
+
+    by=element (default) sums constraints on the same monitored element hour by hour, since
+    elements often bind under a new constraint ID while the forecast sits on an older one.
+
+    Columns: abs_error = sum over hours of |forecast - actual| (the dollars missed either way);
+    bias = forecast_total - actual_total; norm_error = abs_error / max(actual_total,
+    forecast_total), 0 perfect, 1 no overlap, up to 2 (expected-value forecasts rarely get far
+    below 0.7); fc_when_bound / fc_when_not = forecast $ in hours that did / did not bind;
+    bound_unforecast = actual $ on constraint IDs with no forecast row; corr = hourly correlation.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        start_date: First day, YYYY-MM-DD. Default: six days before end_date.
+        end_date: Last day. Default: two days ago, the latest day with complete data.
+        by: element or constraint.
+        min_total: The best-forecast list only includes groups that both bound and were
+            forecast, with an actual or forecast total of at least this, so tiny constraints
+            with near-zero error do not crowd it.
+        limit: Rows per list.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("by", by, shadow_forecasts.GROUPINGS)
+    end = _resolve_date(end_date, ANALYSIS_DAYS_AHEAD)
+    start = datetime.date.fromisoformat(start_date) if start_date else end - datetime.timedelta(days=6)
+
+    df = shadow_forecasts.hourly(engine(), market, start, end)
+    acc = shadow_forecasts.accuracy(df, by)
+    if acc.empty:
+        return f"No RT shadow price forecasts or actuals for {market.upper()} from {start} to {end}."
+    warnings = []
+    cross_market = _cross_market_section(market, acc, start, end, min_total, limit, warnings) if by == "element" else []
+    acc["linked"] = [monitored_elements.short_links(_link_graph(), market, m) for m in acc["me_id"]]
+    acc = _short(acc, "name")
+    # Elements link to their page; a constraint (by=constraint, or no element mapped) links to its chart.
+    acc["name"] = [links.md(n, links.monitored_element(market, m) if by == "element" and pd.notna(m)
+                            else links.constraint(market, c.split(",")[0], start, end) if c else None)
+                   for n, m, c in zip(acc["name"], acc["me_id"], acc["constraint_ids"])]
+    acc["me_id"] = acc["me_id"].map(lambda v: "" if v is None or pd.isna(v) else str(int(v)))
+    acc["constraint_ids"] = acc["constraint_ids"].str.slice(0, 40)
+    for col in ("corr", "norm_error"):
+        acc[col] = acc[col].map(lambda v: "" if pd.isna(v) else f"{v:.2f}")
+    cols = ["me_id", "name", "constraint_ids", "actual_total", "forecast_total", "bias", "abs_error", "norm_error",
+            "hours_bound", "fc_when_bound", "fc_when_not", "bound_unforecast", "corr", "linked"]
+
+    act_total, fc_total = df["actual"].sum(), df["forecast"].sum()
+    material = acc[(acc[["actual_total", "forecast_total"]].max(axis=1) >= min_total)
+                   & (acc["actual_total"] > 0) & (acc["forecast_total"] > 0)]
+    lines = [f"=== {market.upper()} RT shadow price forecast accuracy, {start} to {end} (by {by}) ===",
+             f"Actual total {act_total:.0f}; forecast total {fc_total:.0f}; summed abs_error "
+             f"{acc['abs_error'].sum():.0f}; actual $ on constraint IDs with no forecast row "
+             f"{acc['bound_unforecast'].sum():.0f}."
+             + (" Actuals include preliminary prices." if df["preliminary"].any() else ""),
+             "", f"--- Largest misses (abs_error) ---"]
+    lines += _tsv(acc.head(limit), cols)
+    lines += ["", f"--- Best forecasts: lowest norm_error with actual or forecast total >= {min_total:.0f} ---"]
+    lines += _tsv(material.sort_values(["norm_error", "abs_error"]).head(limit), cols) if not material.empty else ["None."]
+    unforecast = acc[acc["bound_unforecast"] > 0].sort_values("bound_unforecast", ascending=False)
+    if not unforecast.empty:
+        lines += ["", "--- Bound on constraint IDs with no forecast row ---"]
+        lines += _tsv(unforecast.head(limit), cols)
+    lines += cross_market
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+def _outage_condition_parts(eng, market: str, condition: tuple, names: dict, warnings: list[str]) -> list[str]:
+    """The outages a model's training hours required, with group and outage links. ``names``
+    holds the equipment already named, so each is named and linked only once."""
+    filter_text, ids, op, not_ids, not_op = condition
+    parts = []
+    if filter_text:
+        groups = forecast_models.outage_filter_groups(eng, filter_text, warnings.append)
+
+        def label(match):
+            mkt, state, kind, gid = match.groups()
+            text_ = f"{kind.upper()}ID {gid}" + (f" {groups[(mkt, gid)]}" if (mkt, gid) in groups else "")
+            url = links.outage_group(mkt, gid) if kind == "g" and mkt == "miso" else (
+                links.outage(mkt, gid) if kind == "e" else None)
+            return f"{mkt}:{state}:" + links.md(text_, url)
+        parts.append("filter " + forecast_models._FILTER_TOKEN.sub(label, filter_text))
+
+    def named(eq):
+        # Name and link an outage the first time; later conditions just repeat the ID.
+        if eq in names:
+            return eq
+        found = osearch.fetch_outage_names(eng, "Equipment ID", eq, market, [eq], warn=warnings.append)
+        names[eq] = found[0] if found else ""
+        return links.md(f"{eq} {names[eq]}".strip(), links.outage(market, eq))
+    if ids:
+        parts.append(f"outages active ({op}): " + ", ".join(named(e) for e in ids))
+    if not_ids:
+        parts.append(f"not active ({not_op}): " + ", ".join(named(e) for e in not_ids))
+    return parts
+
+
+@server.tool(annotations=READ_ONLY)
+def get_forecast_model(market: str, constraint_id: int, date: str | None = None, days_ahead: int = 1,
+                       all_details: bool = False) -> str:
+    """The regression models behind a constraint's RT shadow price forecast for a day: its
+    EnergyCore model group, each model's features, training setup, outage filter, fit
+    statistics, and weight in the forecast, and the hourly outputs next to the forecast table.
+
+    simple-mode groups average the models' hourly outputs by simple_weight; shaped-mode
+    groups set the daily total from the total_weight models and the hourly shape from the
+    shaping_weight models (each model also has a scaling_factor). An applied group writes its
+    forecast into the forecast table's manual column, but traders can edit it afterwards.
+
+    Features are written as formulas: a - b (delta), a + b (sum), a * b (product), «name»
+    for a saved custom function, and "same" when the forecast day uses the same series it
+    was trained on. Outage conditions shared by several models are listed once (O1, O2, ...).
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        constraint_id: RT constraint ID. If it has no group that day, a group for another
+            constraint on the same monitored element is used.
+        date: The forecast day, YYYY-MM-DD.
+        days_ahead: Days from today when date is not given (1 = tomorrow).
+        all_details: Show models with no weight in full and expand «custom» functions into
+            their formulas (by default unweighted models get one line of features).
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    day = _resolve_date(date, days_ahead)
+    eng = engine()
+    warnings = []
+
+    group, note = forecast_models.find_group(eng, market, constraint_id, day)
+    if group is None:
+        return (f"No {market.upper()} model group forecasts constraint {constraint_id} on {day}, nor any other "
+                "constraint on its monitored element.")
+    cid = int(group["group_constraint_id"])
+    models = forecast_models.group_models(eng, market, group["id"])
+    shadow = shadow_forecasts.hourly(eng, market, day, day, [cid]).sort_values("hr")
+    name = next((n for n in shadow["name"] if n), "")
+    me_id = shadow["me_id"].dropna().iloc[0] if shadow["me_id"].notna().any() else None
+
+    group_link = links.md(f"{group['id']} {group['name']}", links.model_group(market, group["id"]))
+    lines = [f"=== {market.upper()} model group {group_link} for {_constraint_title(market, cid, name, me_id, day)} "
+             f"on {day} ==="]
+    if note:
+        lines.append(note)
+    allocation = group["constraint_allocation"] or {}
+    lines.append(f"Mode {group['mode']}, state {group['group_state']}"
+                 + (", early" if group["early"] else "")
+                 + f"; group total {group['estimated_proposed_forecast'] or 0:.0f}"
+                 + (f", allocated {', '.join(f'{c}: {float(p):.0%}' for c, p in allocation.items())}"
+                    f" ({group['constraint_allocation_mode']})" if allocation else "")
+                 + (f"; floor {group['forecast_floor']:g}" if group["forecast_floor"] is not None else "")
+                 + (f"; ceiling {group['forecast_ceiling']:g}" if group["forecast_ceiling"] is not None else "")
+                 + f". Created {_fmt_dt(group['created_at'])}, updated {_fmt_dt(group['updated_at'])}.")
+    scaling = group["forecast_hourly_scaling_factors"] or []
+    if scaling and any(float(s) != 1.0 for s in scaling):
+        lines.append("Hourly scaling factors: " + ", ".join(f"{float(s):g}" for s in scaling))
+    if models.empty:
+        return "\n".join(lines + ["No models in this group."])
+
+    total, implied_hourly = forecast_models.implied_forecast(group, models, cid)
+    table_total = shadow["forecast"].sum()
+    lines.append(f"The weights imply {total:.0f} for constraint {cid}; the forecast table has {table_total:.0f} "
+                 f"(manual {shadow['manual_fc'].sum():.0f}, default {shadow['default_fc'].sum():.0f})."
+                 + ("" if abs(total - table_total) <= max(5, 0.05 * table_total) else
+                    " They differ, so the forecast was edited after the models ran, or the group was not applied."))
+
+    models["total_for_constraint"] = [None if (h := forecast_models.hourly_output(o, cid)) is None else h.sum()
+                                      for o in models["output"]]
+    models = models.sort_values("weighted", ascending=False, kind="stable")
+    detailed = models["weighted"] | all_details
+
+    # Outage conditions are usually shared by many models: list each once, as O1, O2, ...
+    models["condition"] = [forecast_models.outage_condition(m.parameters, m.outage_equipment_filter)
+                           for m in models.itertuples()]
+    labels = {c: f"O{i + 1}" for i, c in enumerate(dict.fromkeys(models["condition"]))}
+    models["outages"] = models["condition"].map(labels)
+
+    # Model names often share a long prefix (the outage set); say it once.
+    names = models["name"].fillna("").tolist()
+    prefix = os.path.commonprefix(names) if len(names) > 1 else ""
+    prefix = prefix[:prefix.rfind(" ") + 1] if len(prefix) > 15 else ""
+    models["short_name"] = [n[len(prefix):] or n for n in names]
+
+    shown = models.copy()
+    shown["model"] = [links.md(i, links.model_output(market, i)) for i in shown["id"]]
+    shown["window"] = [f"{a}..{b} {t}" for a, b, t in zip(shown["start_at"], shown["end_at"], shown["date_type"])]
+    shown = _short(shown, "short_name", 70)
+    cols = ["model", "short_name", "regression", "model_state", "total_weight", "shaping_weight", "simple_weight",
+            "scaling_factor", "window", "outages", "training_hours", "total_for_constraint"]
+    cols += [c for c in ("cv_adjusted_rsquare", "weighted_rsquare", "mae", "rmse") if c in shown]
+    same = [c for c in ("regression", "model_state", "scaling_factor", "window", "outages")
+            if shown[c].astype(str).nunique() == 1 and len(shown) > 1]
+    lines += ["", "--- Models (weights: total and shaping for shaped mode, simple for simple mode) ---"]
+    if prefix:
+        lines.append(f"Names below drop the prefix every model shares: \"{prefix.strip()}\".")
+    if same:
+        lines.append("All models: " + "; ".join(f"{c} {_tsv(shown.head(1), [c], decimals=2)[1]}" for c in same) + ".")
+    lines += _tsv(shown, [c for c in cols if c not in same], decimals=2)
+
+    lines += ["", "--- Training data: outage conditions and spells (stretches where the condition held) ---"]
+    outage_names = {}
+    for condition, label in labels.items():
+        first = models[models["condition"] == condition].iloc[0]
+        parts = _outage_condition_parts(eng, market, condition, outage_names, warnings) or ["no outage condition"]
+        lines.append(f"{label}: " + "; ".join(parts))
+        if first["spells"]:
+            spells = "; ".join(f"{a} to {b}" for a, b, _ in first["spells"][-5:])
+            n = len(first["spells"])
+            lines.append(f"    model {first['id']}: {n} spell{'s' if n != 1 else ''}, {first['training_hours']} hours"
+                         + (f"; latest 5: {spells}" if n > 5 else f": {spells}"))
+
+    setups = {m.id: forecast_models.training_setup(m.parameters) for m in models[detailed].itertuples()}
+    shared_setup = [x for x in next(iter(setups.values()), []) if all(x in v for v in setups.values())]
+    lines += ["", "--- Features: trained on; fed on the forecast day (\"same\" = the same series) ---"]
+    if shared_setup:
+        lines.append("Setup for every model below: " + "; ".join(shared_setup) + ".")
+    for m, full in zip(models.itertuples(), detailed):
+        feats = forecast_models.features(m.parameters, expand_custom=all_details)
+        if not full:
+            lines.append(f"* {m.id} ({m.regression}, no weight): "
+                         + ("; ".join(forecast_models.feature_lines(feats, with_fed=False))
+                            or "no features (average of matching hours)"))
+            continue
+        weights = ", ".join(f"{k} {getattr(m, k + '_weight'):g}" for k in ("total", "shaping", "simple")
+                            if getattr(m, k + "_weight")) or "no weight"
+        lines.append(f"* {m.id} ({m.regression}, {weights}): {m.short_name}")
+        lines += [f"    - {f}" for f in forecast_models.feature_lines(feats)] or [
+            "    - no features (an average of matching hours)"]
+        own_setup = [x for x in setups[m.id] if x not in shared_setup]
+        if own_setup:
+            lines.append("    - setup: " + "; ".join(own_setup))
+
+    hourly = shadow[["hr", "default_fc", "manual_fc", "forecast", "actual"]].copy()
+    group_default = forecast_models.hourly_output(group["default_forecast"], cid)
+    if group_default is not None:
+        hourly.insert(1, "group_default", list(group_default[:len(hourly)]) + [None] * (len(hourly) - len(group_default)))
+    if implied_hourly is not None:
+        hourly.insert(1, "implied", implied_hourly[:len(hourly)])
+    out_cols = []
+    for m in models[models["weighted"]].itertuples():
+        h = forecast_models.hourly_output(m.output, cid)
+        if h is not None:
+            hourly[f"m{m.id}"] = list(h[:len(hourly)]) + [None] * (len(hourly) - len(h))
+            out_cols.append(f"m{m.id}")
+    lines += ["", f"--- Hourly: weighted models' outputs for constraint {cid} (m<model id>), "
+                  "then the forecast table ---"]
+    has_actuals = hourly["actual"].sum() > 0
+    cols = ["hr"] + out_cols + [c for c in ("implied", "group_default") if c in hourly] + \
+           ["default_fc", "manual_fc", "forecast"] + (["actual"] if has_actuals else [])
+    lines += _tsv(hourly, cols, decimals=1)
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+def get_monitored_element(market: str, me_id: int, max_description_chars: int = 4000) -> str:
+    """One monitored element: name, type, stations and areas, the same equipment in the other
+    direction, the desk's description from its EnergyCore page, the elements its description
+    links to (often the same line in another market, which names alone cannot pair: MISO 834
+    Lime Creek-Barton is SPP 1376 TMP421_29021), and its recent constraints.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        me_id: Monitored element ID. RT and DA use different IDs for the same line.
+        max_description_chars: Cut the description after this many characters. 0 for all of it.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    eng = engine()
+    row = monitored_elements.element(eng, market, me_id)
+    if row is None:
+        return f"No {market.upper()} monitored element {me_id}."
+
+    def station(name, kv, area):
+        return " ".join(x for x in (name, f"{kv:g} kV" if kv else "", f"({area})" if area else "") if x)
+    title = links.md(f"{me_id} {row['monitored_element_name']}", links.monitored_element(market, me_id))
+    lines = [f"=== {market.upper()} monitored element {title} ==="]
+    details = []
+    if row["equipment_type"]:
+        details.append(f"type {row['equipment_type']}{' (multi)' if row['is_multi'] else ''}")
+    if row["from_station"] or row["to_station"]:
+        details.append(f"{station(row['from_station'], row['from_kv'], row['from_area'])} -> "
+                       f"{station(row['to_station'], row['to_kv'], row['to_area'])}")
+    for key, label in (("direction", "direction"), ("non_directional_name", "non-directional name"), ("baa", "BAA")):
+        if row[key]:
+            details.append(f"{label} {row[key]}")
+    details.append(f"last used {row['last_used']}")
+    summary = "; ".join(details)
+    lines.append(summary[0].upper() + summary[1:] + ".")
+
+    others = monitored_elements.other_directions(eng, market, row)
+    if not others.empty:
+        lines.append("Other directions: " + ", ".join(
+            f"{links.md(f'{o.me_id} {o.name}', links.monitored_element(market, o.me_id))} (last used {o.last_used})"
+            for o in others.itertuples()))
+
+    linked = _link_graph().get((market, int(me_id)), [])
+    lines += ["", "--- Linked elements (from desk descriptions; out = this element's description links it, "
+                  "in = the other element's does) ---"]
+    if linked:
+        table = pd.DataFrame(linked)
+        found = {}
+        for mkt, ids in table.groupby("market")["me_id"]:
+            found.update({(mkt, k): v for k, v in monitored_elements.names(eng, mkt, ids).items()})
+        table["element"] = [links.md(f"{m}:{i} {found.get((m, i), '')}".strip(), links.monitored_element(m, i))
+                            for m, i in zip(table["market"], table["me_id"])]
+        lines += _tsv(table, ["element", "direction", "context"])
+    else:
+        lines.append("None.")
+
+    description = osearch.clean_annotation_notes(row["description"] or "")
+    if max_description_chars and len(description) > max_description_chars:
+        description = description[:max_description_chars] + f"... ({len(description)} characters in all)"
+    lines += ["", "--- Description ---", description or "None."]
+
+    constraints = monitored_elements.recent_constraints(eng, market, me_id)
+    lines += ["", "--- Constraints on this element, most recently used first ---"]
+    if constraints.empty:
+        lines.append("None.")
+    else:
+        constraints["name"] = [
+            links.md(n, links.constraint(market, c, u - datetime.timedelta(days=30), u) if isinstance(u, datetime.date)
+                     else None) for n, c, u in zip(constraints["name"], constraints["constraint_id"], constraints["last_used"])]
+        lines += _tsv(constraints, ["constraint_id", "name", "contingency", "rt_max_limit", "last_used"])
+    return "\n".join(lines)
+
+
+def _linked_elements_line(eng, market: str, me_id) -> list[str]:
+    """Description and linked elements lines for a tool header; empty when there is nothing."""
+    if me_id is None or pd.isna(me_id):
+        return []
+    lines = []
+    row = monitored_elements.element(eng, market, int(me_id))
+    if row and row["description"]:
+        lines.append("Element description: " + monitored_elements.short_description(row["description"], 300))
+    linked = _link_graph().get((market, int(me_id)), [])
+    if linked:
+        lines.append("Linked elements: " + "; ".join(
+            links.md(f"{l['market']}:{l['me_id']}", links.monitored_element(l["market"], l["me_id"]))
+            + (f" ({l['context']})" if l["context"] else "") for l in linked)
+            + " (get_monitored_element has details).")
+    return lines
+
+
+def _cross_market_section(market: str, acc: pd.DataFrame, start: datetime.date, end: datetime.date,
+                          min_total: float, limit: int, warnings: list[str]) -> list[str]:
+    """Elements linked to elements in other markets, with both sides' actual and forecast totals."""
+    graph = _link_graph()
+    pairs = [(r, l) for r in acc.itertuples() if pd.notna(r.me_id)
+             for l in monitored_elements.cross_market_links(graph, market, r.me_id)]
+    if not pairs:
+        return []
+    other = {}
+    for mkt in {l["market"] for _, l in pairs if l["market"] in osearch.MARKETS}:
+        try:
+            oacc = shadow_forecasts.accuracy(shadow_forecasts.hourly(engine(), mkt, start, end), "element")
+            other[mkt] = oacc.dropna(subset=["me_id"]).assign(me_id=lambda d: d["me_id"].astype(int)).set_index("me_id")
+        except Exception as e:
+            warnings.append(f"Could not load {mkt.upper()} forecasts for linked elements: {e}")
+    rows = []
+    for r, l in pairs:
+        o = other.get(l["market"])
+        o_row = o.loc[l["me_id"]] if o is not None and l["me_id"] in o.index else None
+        o_act = float(o_row["actual_total"]) if o_row is not None else 0.0
+        o_fc = float(o_row["forecast_total"]) if o_row is not None else 0.0
+        if max(r.actual_total, r.forecast_total, o_act, o_fc) < min_total:
+            continue
+        rows.append({"me_id": int(r.me_id), "name": r.name,
+                     "linked": links.md(f"{l['market']}:{l['me_id']}", links.monitored_element(l["market"], l["me_id"])),
+                     "linked_name": "" if o_row is None else str(o_row["name"])[:50], "context": l["context"][:40],
+                     "actual": r.actual_total, "forecast": r.forecast_total, "linked_actual": o_act,
+                     "linked_forecast": o_fc, "combined_actual": r.actual_total + o_act,
+                     "combined_forecast": r.forecast_total + o_fc})
+    if not rows:
+        return []
+    table = pd.DataFrame(rows).sort_values("combined_actual", ascending=False).head(limit)
+    return ["", f"--- Shared with other markets (elements linked in desk descriptions, combined actual or forecast "
+                f">= {min_total:.0f}; a link can be the flipped direction, see context) ---"] + \
+        _tsv(table, ["me_id", "name", "linked", "linked_name", "context", "actual", "forecast", "linked_actual",
+                     "linked_forecast", "combined_actual", "combined_forecast"])
 
 
 def _autoflow_header(meta: dict) -> str:
@@ -402,7 +879,8 @@ def get_autoflow(market: str, constraint_id: int, start_date: str | None = None,
     if meta is None or hourly.empty:
         return "\n".join([f"No autoflow for {market.upper()} constraint {constraint_id}."] + _warnings_section(warnings))
 
-    lines = [f"=== Autoflow on {market.upper()} constraint {constraint_id}, {start} to {end} ===", _autoflow_header(meta), ""]
+    title = links.md(f"{market.upper()} constraint {constraint_id}", links.constraint(market, constraint_id, start, end))
+    lines = [f"=== Autoflow on {title}, {start} to {end} ===", _autoflow_header(meta), ""]
     lines += _tsv(hourly, [c for c in ("dt", "hr", "autoflow", "solar", "wind", "load") if c in hourly.columns], decimals=1)
 
     zones = (leverage.groupby(["coefficient_type", "iso", "zone", "coefficient"])
@@ -418,6 +896,24 @@ def _short(df: pd.DataFrame, col: str, width: int = 70) -> pd.DataFrame:
     df = df.copy()
     df[col] = df[col].astype(str).str.slice(0, width)
     return df
+
+
+def _link_outages(df: pd.DataFrame, market: str, col: str = "name", active: bool = False) -> pd.DataFrame:
+    """Makes ``col`` a link to each row's outage search, using the row's market column when there is one."""
+    df = df.copy()
+    markets = df["market"] if "market" in df else pd.Series(market, index=df.index)
+    df[col] = [links.md(label, links.outage(m, eq, active))
+               for label, m, eq in zip(df[col], markets, df["outage_equipment_id"])]
+    return df
+
+
+def _constraint_title(market: str, constraint_id, name: str, me_id, start: datetime.date,
+                      end: datetime.date | None = None) -> str:
+    """'constraint 123: [NAME](chart) (monitored element [456](page))' for tool headers."""
+    title = f"constraint {constraint_id}: {links.md(name or constraint_id, links.constraint(market, constraint_id, start, end))}"
+    if me_id is not None and not pd.isna(me_id):
+        title += f" (monitored element {links.md(int(me_id), links.monitored_element(market, me_id))})"
+    return title
 
 
 def _outage_sections(eng, market: str, constraint_id: int, day: datetime.date, kind: str, shadow: pd.DataFrame,
@@ -453,7 +949,7 @@ def _outage_sections(eng, market: str, constraint_id: int, day: datetime.date, k
             "adds on top of the others. + loads the constraint.",
         ]
         if not impacts.empty:
-            shown = _short(impacts.head(top), "name")
+            shown = _link_outages(_short(impacts.head(top), "name"), market)
             shown["in_active"] = shown["in_active"].map(lambda v: "yes" if v else "")
             shown["check"] = shown["check"].map(lambda v: "check" if v else "")
             shown["start"], shown["end"] = shown["start"].map(_fmt_dt), shown["end"].map(_fmt_dt)
@@ -495,7 +991,7 @@ def _outage_sections(eng, market: str, constraint_id: int, day: datetime.date, k
                 if keep.empty:
                     lines.append("None of them.")
                 else:
-                    keep = _short(keep, "name", 50)
+                    keep = _link_outages(_short(keep, "name", 50), market, active=True)
                     keep["time"] = keep["time"].map(_fmt_dt)
                     keep["impact"] = keep["impact"].map(lambda v: "yes" if v else "")
                     keep["lines_up"] = keep["lines_up"].map(lambda v: "yes" if v else "")
@@ -524,7 +1020,9 @@ def _outage_sections(eng, market: str, constraint_id: int, day: datetime.date, k
                       ["annotation_id", "name", "outage_equipment_id", "start_dt", "stop_dt", "notes"])
     if not matches["flags"].empty:
         lines.append("Desk flags and notes on the outages above:")
-        lines += _tsv(_short(matches["flags"].head(top), "notes", 200), ["outage_equipment_id", "flag_type", "updated_at",
+        flags = _short(matches["flags"].head(top), "notes", 200)
+        flags["outage_equipment_id"] = [links.md(e, links.outage(market, e)) for e in flags["outage_equipment_id"]]
+        lines += _tsv(flags, ["outage_equipment_id", "flag_type", "updated_at",
                                                                           "notes"])
     if all(df.empty for df in matches.values()):
         lines.append("Nothing found.")
@@ -566,7 +1064,8 @@ def get_outage_impacts(market: str, constraint_id: int, date: str | None = None,
     end = datetime.datetime.combine(day, datetime.time()) + datetime.timedelta(hours=end_hr)
     summary, impacts = outage_impacts.outage_impacts(eng, market, constraint_id, start, end, day, end_hr,
                                                      warn=warnings.append)
-    lines = [f"=== Outage impacts on {market.upper()} constraint {constraint_id} ({summary.get('name')}), "
+    lines = [f"=== Outage impacts on {market.upper()} "
+             f"{_constraint_title(market, constraint_id, summary.get('name'), summary.get('me_id'), day)}, "
              f"{day} HE{start_hr}-HE{end_hr} ==="]
     if impacts.empty:
         return "\n".join(lines + ["No outage impacts (see warnings)."] + _warnings_section(warnings))
@@ -576,7 +1075,7 @@ def get_outage_impacts(market: str, constraint_id: int, date: str | None = None,
               f"{limit.get('limit_mw') or 'unknown'} ({limit.get('source')}).",
               f"Binding-direction flow after contingency {summary['base_post_mw']:.0f} MW; with all significant "
               f"outages {summary['post_all_mw']:.0f} MW. + loads the constraint.", ""]
-    shown = _short(impacts.head(top), "name")
+    shown = _link_outages(_short(impacts.head(top), "name"), market)
     shown["start"], shown["end"] = shown["start"].map(_fmt_dt), shown["end"].map(_fmt_dt)
     cols = ["market", "outage_equipment_id", "name", "in_active", "request_status", "start", "end", "pre_ctg_lodf_pct",
             "individual_mw"] + [c for c in ("individual_pct",) if c in shown] + ["in_combination_mw"] + \
@@ -639,8 +1138,9 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
 
     me_id, name = drivers.constraint_info(eng, market, day, constraint_id, kind)
 
-    lines = [f"=== {market.upper()} {kind.upper()} CONSTRAINT {constraint_id}: {name} (monitored element {me_id}) on {day} ===",
-             "", "--- Hourly shadow prices ---"]
+    lines = [f"=== {market.upper()} {kind.upper()} {_constraint_title(market, constraint_id, name, me_id, day)} on {day} ==="]
+    lines += _linked_elements_line(eng, market, me_id)
+    lines += ["", "--- Hourly shadow prices ---"]
     lines += _tsv(hourly, ["hr", "shadow_price"])
     lines.append(f"Total {hourly['shadow_price'].sum():.0f} over {len(hourly)} hours.")
     lines += _market_conditions_section(eng, market, day, hourly, warnings)

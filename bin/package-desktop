@@ -11,6 +11,14 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# The bundle is copied from the working tree, so only build from committed code: then every
+# .mcpb matches a commit. Untracked files count too (a new lib/*.py would be bundled).
+if [ -n "$(git status --porcelain)" ]; then
+  echo "✖ Uncommitted changes; commit or stash them before packaging:" >&2
+  git status --short >&2
+  exit 1
+fi
+
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 OUT="dist/energycore-outages.mcpb"
