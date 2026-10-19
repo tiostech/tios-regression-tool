@@ -65,7 +65,8 @@ run_button = st.sidebar.button("Run Divergence Analysis", type="primary")
 @st.cache_data(ttl=600)
 def fetch_current_coefficients(iso: str):
     """
-    Fetches the latest active coefficient set as of today for all active constraints.
+    Fetches the latest active coefficient set as of today for all active constraints,
+    joining the official constraint descriptive name.
     Strictly filters for vendor='meteologica' (excluding PRT).
     """
     query = f"""
@@ -77,6 +78,7 @@ def fetch_current_coefficients(iso: str):
     )
     SELECT 
         z.official_constraint_id,
+        COALESCE(oc.rt_descriptive_name, oc.da_descriptive_name, 'Unknown Constraint') AS constraint_name,
         LOWER(TRIM(z.zone)) AS zone,
         LOWER(TRIM(z.coefficient_type)) AS coefficient_type,
         z.coefficient,
@@ -85,6 +87,8 @@ def fetch_current_coefficients(iso: str):
     INNER JOIN latest_times lt 
       ON z.official_constraint_id = lt.official_constraint_id 
      AND z.computed_at = lt.max_computed
+    LEFT JOIN tioscore_production.{iso}_official_constraints oc
+      ON z.official_constraint_id = oc.id
     WHERE z.vendor = 'meteologica'
     """
     return pd.read_sql(query, db.engine())
@@ -152,7 +156,7 @@ def calculate_autoflow_timeseries(coeff_df: pd.DataFrame, var_df: pd.DataFrame) 
         return pd.DataFrame()
 
     c_df = coeff_df.groupby(
-        ["official_constraint_id", "zone", "coefficient_type"], as_index=False
+        ["official_constraint_id", "constraint_name", "zone", "coefficient_type"], as_index=False
     )["coefficient"].mean()
 
     merged = pd.merge(
@@ -165,7 +169,7 @@ def calculate_autoflow_timeseries(coeff_df: pd.DataFrame, var_df: pd.DataFrame) 
     merged["term_val"] = merged["coefficient"] * merged["forecast_mw"]
 
     autoflow_hourly = merged.groupby(
-        ["official_constraint_id", "dt", "hr"], as_index=False
+        ["official_constraint_id", "constraint_name", "dt", "hr"], as_index=False
     )["term_val"].sum().rename(columns={"term_val": "autoflow_mw"})
 
     return autoflow_hourly
@@ -207,19 +211,19 @@ if run_button or "autoflow_ran" in st.session_state:
         st.stop()
 
     # Aggregate Historical Baseline per constraint
-    hist_summary = baseline_af.groupby("official_constraint_id").agg(
+    hist_summary = baseline_af.groupby(["official_constraint_id", "constraint_name"]).agg(
         hist_avg_autoflow=("autoflow_mw", "mean"),
         hist_peak_autoflow=("autoflow_mw", "max")
     ).reset_index()
 
     # Aggregate Evaluation Date per constraint
-    eval_summary = eval_af.groupby("official_constraint_id").agg(
+    eval_summary = eval_af.groupby(["official_constraint_id", "constraint_name"]).agg(
         eval_avg_autoflow=("autoflow_mw", "mean"),
         eval_peak_autoflow=("autoflow_mw", "max")
     ).reset_index()
 
     # Combine Baseline and Evaluation Date
-    summary = pd.merge(eval_summary, hist_summary, on="official_constraint_id", how="inner")
+    summary = pd.merge(eval_summary, hist_summary, on=["official_constraint_id", "constraint_name"], how="inner")
 
     summary["avg_delta_mw"] = summary["eval_avg_autoflow"] - summary["hist_avg_autoflow"]
     summary["peak_delta_mw"] = summary["eval_peak_autoflow"] - summary["hist_avg_autoflow"]
@@ -248,23 +252,25 @@ if run_button or "autoflow_ran" in st.session_state:
         )
         
         formatted_summary = formatted_summary[[
-            "ecore_url", "official_constraint_id", "eval_peak_autoflow", "eval_avg_autoflow", 
-            "hist_avg_autoflow", "peak_delta_mw", "avg_delta_mw"
+            "official_constraint_id", "constraint_name", "ecore_url", "eval_peak_autoflow", 
+            "eval_avg_autoflow", "hist_avg_autoflow", "peak_delta_mw", "avg_delta_mw"
         ]]
         
         formatted_summary.columns = [
-            "ECore Link", "Constraint ID", f"Eval Date Peak AutoFlow (MW)", f"Eval Date Avg AutoFlow (MW)",
-            f"Past {lookback_days}-Day Avg AutoFlow (MW)", "Peak Divergence Shift (MW)", "Avg Divergence Shift (MW)"
+            "Constraint ID", "Constraint Name", "ECore Link", f"Eval Date Peak AutoFlow (MW)", 
+            f"Eval Date Avg AutoFlow (MW)", f"Past {lookback_days}-Day Avg AutoFlow (MW)", 
+            "Peak Divergence Shift (MW)", "Avg Divergence Shift (MW)"
         ]
 
         st.dataframe(
             formatted_summary,
             column_config={
+                "Constraint ID": st.column_config.NumberColumn("Constraint ID", format="%d"),
+                "Constraint Name": st.column_config.TextColumn("Constraint Name"),
                 "ECore Link": st.column_config.LinkColumn(
                     "Constraint Link",
                     display_text=r"https://energycore\.tioscapital\.com/[^/]+/constraints/(.*)"
                 ),
-                "Constraint ID": st.column_config.NumberColumn("Constraint ID", format="%d"),
                 f"Eval Date Peak AutoFlow (MW)": st.column_config.NumberColumn(format="%.2f"),
                 f"Eval Date Avg AutoFlow (MW)": st.column_config.NumberColumn(format="%.2f"),
                 f"Past {lookback_days}-Day Avg AutoFlow (MW)": st.column_config.NumberColumn(format="%.2f"),
@@ -285,9 +291,10 @@ if run_button or "autoflow_ran" in st.session_state:
 
         for _, row in bullish_summary.iterrows():
             cid = int(row["official_constraint_id"])
+            cname = row["constraint_name"]
             peak_shift = row["peak_delta_mw"]
             
-            with st.expander(f"Constraint {cid} — Peak Shift: +{peak_shift:.2f} MW"):
+            with st.expander(f"Constraint {cid} — {cname} (Peak Shift: +{peak_shift:.2f} MW)"):
                 chart_data = af_ts[af_ts["official_constraint_id"] == cid].copy()
                 chart_data["timestamp"] = pd.to_datetime(
                     chart_data["dt"].astype(str) + " " + (chart_data["hr"] - 1).astype(str).str.zfill(2) + ":00:00"
@@ -299,7 +306,7 @@ if run_button or "autoflow_ran" in st.session_state:
                     x="timestamp",
                     y="autoflow_mw",
                     labels={"autoflow_mw": "AutoFlow Stress (MW)", "timestamp": "Date & Hour"},
-                    title=f"Constraint {cid}: AutoFlow Timeseries (Past {lookback_days} Days to Eval Date {target_eval_date})"
+                    title=f"Constraint {cid} ({cname}): AutoFlow Timeseries (Past {lookback_days} Days to Eval Date {target_eval_date})"
                 )
 
                 # Add vertical line marking where the evaluation date forecast begins
@@ -321,7 +328,7 @@ if run_button or "autoflow_ran" in st.session_state:
     with st.expander("How This Tool Works"):
         st.markdown(
             f"""
-            1. **Pulls Today's Active Coefficients:** Grabs the single newest set of active AutoFlow coefficients computed today for each constraint (strictly using Meteologica and excluding PRT).
+            1. **Pulls Today's Active Coefficients:** Grabs the single newest set of active AutoFlow coefficients computed today for each constraint (strictly using Meteologica and excluding PRT), joined with official constraint descriptive names.
             2. **Pulls Hourly Variable Timeseries:** Queries hourly Meteologica load, wind, and solar variables across the full range—from your selected lookback window (past {lookback_days} days) through your chosen evaluation date ({target_eval_date}).
             3. **Calculates Hourly AutoFlow:** Applies today's fixed coefficients across every hour of both the historical lookback and the evaluation date to build a continuous AutoFlow MW timeseries.
             4. **Aggregates Baseline vs. Evaluation Date:** Averages historical AutoFlow values over the lookback period to establish a baseline, then calculates both peak hourly and daily average AutoFlow for the evaluation date ({target_eval_date}).
