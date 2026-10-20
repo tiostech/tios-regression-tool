@@ -568,7 +568,8 @@ tuple[pd.DataFrame, bool]:
         same_day = [k in match_keys for k in
                     zip(candidates['official_monitored_element_id'], candidates['dt'].dt.normalize())]
         df_same_day = candidates[same_day].copy()
-        df_same_day['matches_search'] = False
+        # Label by the actual match, so matching notes cut by the row limit aren't shown as non-matching
+        df_same_day['matches_search'] = mask.loc[df_same_day.index]
         df_matches = pd.concat([df_matches, df_same_day])
         df_matches = df_matches.sort_values(by=['dt', 'matches_search'], ascending=False)
 
@@ -975,9 +976,11 @@ if st.sidebar.button("Run Search", type="primary"):
                         sorted_group_df = group_df.sort_values(by=['dt', 'matches_search'], ascending=False)
                         max_dt = sorted_group_df['dt'].max()
 
-                        # Count each day/context once: several notes on the same day share one shadow price
+                        # Order tabs by matching notes only (not same-day extras), counting each
+                        # day/context once since several notes on the same day share one shadow price
+                        matched_rows = sorted_group_df[sorted_group_df['matches_search']]
                         sum_shadow = pd.to_numeric(
-                            sorted_group_df.drop_duplicates(subset=['dt', 'context'])['total_shadow_price'],
+                            matched_rows.drop_duplicates(subset=['dt', 'context'])['total_shadow_price'],
                             errors='coerce').fillna(0).sum()
 
                         me_groups.append({
@@ -1022,7 +1025,7 @@ if st.sidebar.button("Run Search", type="primary"):
                 if len(df) > n_matched:
                     result_msg += f" Also showing {len(df) - n_matched} other note(s) from the same days."
                 if was_limited:
-                    result_msg += " ⚠️ Results limited to 2000 rows for performance. Refine your search to see more results."
+                    result_msg += " ⚠️ Matching notes limited to the 2000 most recent for performance (other notes from those days are shown on top of that). Refine your search to see more results."
                 st.success(result_msg)
 
                 if me_groups:
