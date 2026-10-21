@@ -4,12 +4,14 @@
 # Install it by double-clicking the file (or Settings > Extensions > Install
 # Extension in Claude Desktop), then enter your database username and password.
 #
-# Files are copied into the bundle from an allowlist, so config/mysql.yml and
-# anything else with credentials can never end up in it.
+# Files are copied into the bundle from an allowlist (bin/_bundle.sh), so config/mysql.yml
+# and anything else with credentials can never end up in it. bin/install-claude-code
+# installs the same bundle for Claude Code.
 set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source bin/_bundle.sh
 
 # The bundle is copied from the working tree, so only build from committed code: then every
 # .mcpb matches a commit. Untracked files count too (a new lib/*.py would be bundled).
@@ -30,18 +32,7 @@ else
 fi
 
 echo "Staging bundle in $STAGE..."
-cp packaging/claude-desktop/manifest.json packaging/claude-desktop/pyproject.toml "$STAGE/"
-cp .python-version mcp_server.py "$STAGE/"
-mkdir -p "$STAGE/lib" "$STAGE/prompts"
-cp lib/*.py "$STAGE/lib/"
-cp prompts/outage_briefing.md prompts/binding_drivers.md "$STAGE/prompts/"
-
-# Pin the dependency versions inside the bundle so every install gets the same set.
-if command -v uv >/dev/null 2>&1; then
-  (cd "$STAGE" && uv lock --quiet)
-else
-  echo "⚠ uv not found; packaging without uv.lock (installs will resolve latest versions)."
-fi
+stage_bundle "$REPO_ROOT" "$STAGE"
 
 "${MCPB[@]}" validate "$STAGE/manifest.json"
 mkdir -p dist

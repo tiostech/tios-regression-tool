@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Install the MCP server for Claude Code as a pinned, self-contained bundle: the same files and
+# uv.lock as the Claude Desktop .mcpb (bin/_bundle.sh), not this checkout's working tree or its
+# Streamlit .venv. Edits here don't reach Claude Code until you commit and reinstall.
+#
+# Usage: bin/install-claude-code [--ref <commit-ish>] [--no-register]
+#
+#   --ref          what to install (default HEAD). Built from `git archive`, so uncommitted
+#                  changes are never included and the checkout doesn't need to be clean.
+#   --no-register  install and verify, but leave Claude Code's MCP config alone.
+#
+# Installs to ${ENERGYCORE_OUTAGES_HOME:-~/.local/share/energycore-outages}/<commit>/ and points
+# current/ at it. Claude Code runs current/run.sh (registered once, at user scope, so the tools
+# work from any repo). To roll back, rerun with --ref <older commit>.
+#
+# Database credentials live in ${TIOS_CONFIG_DIR:-~/.config/tios}/outages.env (see
+# packaging/claude-code/run.sh). The first run creates it from config/mysql.yml, or asks.
+set -e
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+source bin/_bundle.sh
+
+NAME="energycore-outages"
+INSTALL_ROOT="${ENERGYCORE_OUTAGES_HOME:-$HOME/.local/share/$NAME}"
+CREDS="${TIOS_CONFIG_DIR:-$HOME/.config/tios}/outages.env"
+
+ref=HEAD
+register=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ref) ref="${2:?--ref needs a commit}"; shift 2 ;;
+    --no-register) register=0; shift ;;
+    -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+    *) echo "✖ unknown option: $1 (see --help)" >&2; exit 1 ;;
+  esac
+done
+
+command -v uv >/dev/null 2>&1 || { echo "✖ uv is required: brew install uv" >&2; exit 1; }
+sha="$(git rev-parse --verify --short=12 "$ref^{commit}")"
+dest="$INSTALL_ROOT/$sha"
+
+if [[ -n "$(git status --porcelain)" && "$ref" == HEAD ]]; then
+  echo "Note: installing HEAD ($sha); your uncommitted changes are not included."
+fi
+
+# 1. Build the bundle from the commit, not the working tree.
+if [[ -f "$dest/run.sh" ]]; then
+  echo "Already built: $dest"
+else
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  mkdir "$work/src" "$work/stage"
+  git archive "$sha" | tar -x -C "$work/src"
+  echo "Staging $NAME at $sha..."
+  stage_bundle "$work/src" "$work/stage"
+  # The launcher comes from this checkout, not $sha, so older commits can be installed too.
+  cp "$REPO_ROOT/packaging/claude-code/run.sh" "$work/stage/run.sh"
+  chmod 755 "$work/stage/run.sh"
+  mkdir -p "$INSTALL_ROOT"
+  rm -rf "$dest.partial"
+  mv "$work/stage" "$dest.partial"
+  mv "$dest.partial" "$dest"
+fi
+
+echo "Installing dependencies (uv sync)..."
+uv --directory "$dest" sync --frozen --quiet
+
+# 2. Credentials, kept outside the install and out of ~/.claude.json.
+if [[ ! -r "$CREDS" ]]; then
+  user="" pass=""
+  if [[ -f config/mysql.yml ]]; then
+    { IFS= read -r user; IFS= read -r pass; } < <(uv --directory "$dest" run --frozen --quiet python -c '
+import sys, yaml
+c = (yaml.safe_load(open(sys.argv[1])) or {}).get("mysql_slave") or {}
+for k in ("username", "password"):
+    v = str(c.get(k) or "")
+    print("" if v == "CHANGE_ME" else v)
+' "$REPO_ROOT/config/mysql.yml")
+    [[ -n "$user" && -n "$pass" ]] && echo "Using the database login from config/mysql.yml."
+  fi
+  if [[ -z "$user" || -z "$pass" ]]; then
+    [[ -t 0 ]] || { echo "✖ $CREDS is missing; rerun in a terminal, or create it (see packaging/claude-code/run.sh)" >&2; exit 1; }
+    read -r -p "tioscore_production MySQL username: " user
+    read -r -s -p "Password: " pass; echo
+  fi
+  mkdir -p "$(dirname "$CREDS")"
+  (umask 077; printf 'TIOS_DB_USERNAME=%s\nTIOS_DB_PASSWORD=%s\n' "$user" "$pass" > "$CREDS")
+  echo "Saved credentials to $CREDS (mode 600)."
+fi
+
+# 3. Check the installed server answers an MCP initialize. It exits when stdin closes.
+init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"install-claude-code","version":"0"}}}'
+if printf '%s\n' "$init" | "$dest/run.sh" 2>/dev/null | grep -q '"serverInfo"'; then
+  echo "✔ MCP server starts and answers."
+else
+  echo "✖ The installed server did not answer an MCP initialize. Run it by hand to see why:" >&2
+  echo "  printf '%s\\n' '$init' | $dest/run.sh" >&2
+  exit 1
+fi
+nc -z 127.0.0.1 3309 2>/dev/null || echo "⚠ No database tunnel on 127.0.0.1:3309; the tools fail until you start it."
+
+ln -sfn "$sha" "$INSTALL_ROOT/current"
+echo "current -> $sha"
+
+# 4. Register with Claude Code (user scope). Same command every time, so reinstalls just flip current/.
+if [[ $register == 1 ]]; then
+  if command -v claude >/dev/null 2>&1; then
+    claude mcp remove --scope user "$NAME" >/dev/null 2>&1 || true
+    claude mcp add --scope user "$NAME" -- "$INSTALL_ROOT/current/run.sh" >/dev/null
+    echo "Registered '$NAME' with Claude Code (user scope). Restart Claude Code to load it."
+  else
+    echo "⚠ claude CLI not found; register it yourself: claude mcp add --scope user $NAME -- $INSTALL_ROOT/current/run.sh"
+  fi
+fi
