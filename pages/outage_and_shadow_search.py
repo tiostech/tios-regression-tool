@@ -86,21 +86,31 @@ def extract_matching_sentence(body_text: str, search_fields: list[str]):
     text_clean = re.sub(r"\*+", "", text_clean)
     text_clean = re.sub(r'\[([^\]]+)\]\s*\(([^)]+)\)', r'\1', text_clean)
 
-    raw_sentences = re.split(r'(?<=[.!?|])\s+|\n|\r', text_clean)
-
-    for sentence in raw_sentences:
-        s = sentence.strip()
-        if not s:
+    # Find the earliest match in the whole note first, then expand to the surrounding sentence.
+    # (Splitting into sentences first would break terms containing a period, e.g. "St. Joe".)
+    first_match = None
+    for term in search_fields:
+        term_clean = re.sub(r'\s+', ' ', term.strip())
+        if not term_clean:
             continue
-        for term in search_fields:
-            term_clean = re.sub(r'\s+', ' ', term.strip())
-            escaped_term = re.sub(r'([.\\+*?^$()\[\]{}|])', r'\\\1', term_clean)
-            pattern_str = re.sub(r' ', r'\\s+', escaped_term)
+        escaped_term = re.sub(r'([.\\+*?^$()\[\]{}|])', r'\\\1', term_clean)
+        pattern_str = re.sub(r' ', r'\\s+', escaped_term)
 
-            if re.search(rf"\b{pattern_str}\b", s, re.IGNORECASE):
-                return re.sub(r'\s+', ' ', s).strip()
+        m = re.search(rf"\b{pattern_str}\b", text_clean, re.IGNORECASE)
+        if m and (first_match is None or m.start() < first_match.start()):
+            first_match = m
 
-    return None
+    if first_match is None:
+        return None
+
+    boundary = re.compile(r'(?<=[.!?|])\s+|\n|\r')
+    start = 0
+    for b in boundary.finditer(text_clean, 0, first_match.start()):
+        start = b.end()
+    next_b = boundary.search(text_clean, first_match.end())
+    end = next_b.start() if next_b else len(text_clean)
+
+    return re.sub(r'\s+', ' ', text_clean[start:end]).strip()
 
 
 def render_links_only(text_val: str) -> str:
@@ -548,6 +558,21 @@ tuple[pd.DataFrame, bool]:
     if was_limited:
         df_matches = df_matches.head(result_limit)
 
+    # 3b. Pull in the other notes for the same monitored element on days that had a match
+    # (date/context filters above still apply), so the full day reads like ECore
+    df_matches['matches_search'] = True
+    if not df_matches.empty:
+        match_keys = set(zip(df_matches['official_monitored_element_id'], df_matches['dt'].dt.normalize()))
+        candidates = df[df['official_monitored_element_id'].isin(df_matches['official_monitored_element_id'].unique())]
+        candidates = candidates.drop(index=df_matches.index, errors='ignore')
+        same_day = [k in match_keys for k in
+                    zip(candidates['official_monitored_element_id'], candidates['dt'].dt.normalize())]
+        df_same_day = candidates[same_day].copy()
+        # Label by the actual match, so matching notes cut by the row limit aren't shown as non-matching
+        df_same_day['matches_search'] = mask.loc[df_same_day.index]
+        df_matches = pd.concat([df_matches, df_same_day])
+        df_matches = df_matches.sort_values(by=['dt', 'matches_search'], ascending=False)
+
     # 4. Fetch Targeted Shadow Prices via SQL
     if not df_matches.empty:
         unique_ids = df_matches['official_monitored_element_id'].unique().tolist()
@@ -948,11 +973,15 @@ if st.sidebar.button("Run Search", type="primary"):
                     for (me_id, me_name), group_df in grouped:
                         me_id_str = str(me_id)
                         me_ids_in_df.add(me_id_str)
-                        sorted_group_df = group_df.sort_values(by='dt', ascending=False)
+                        sorted_group_df = group_df.sort_values(by=['dt', 'matches_search'], ascending=False)
                         max_dt = sorted_group_df['dt'].max()
 
-                        sum_shadow = pd.to_numeric(sorted_group_df['total_shadow_price'], errors='coerce').fillna(
-                            0).sum()
+                        # Order tabs by matching notes only (not same-day extras), counting each
+                        # day/context once since several notes on the same day share one shadow price
+                        matched_rows = sorted_group_df[sorted_group_df['matches_search']]
+                        sum_shadow = pd.to_numeric(
+                            matched_rows.drop_duplicates(subset=['dt', 'context'])['total_shadow_price'],
+                            errors='coerce').fillna(0).sum()
 
                         me_groups.append({
                             'me_id': me_id_str,
@@ -991,9 +1020,12 @@ if st.sidebar.button("Run Search", type="primary"):
                             'annotations': ann_list
                         })
 
-                result_msg = f"Found {len(df)} matching quick note record(s) across {len(me_groups)} monitored element(s) in {current_market.upper()} via Direct MySQL 🛢️."
+                n_matched = int(df['matches_search'].sum()) if not df.empty else 0
+                result_msg = f"Found {n_matched} matching quick note record(s) across {len(me_groups)} monitored element(s) in {current_market.upper()} via Direct MySQL 🛢️."
+                if len(df) > n_matched:
+                    result_msg += f" Also showing {len(df) - n_matched} other note(s) from the same days."
                 if was_limited:
-                    result_msg += " ⚠️ Results limited to 2000 rows for performance. Refine your search to see more results."
+                    result_msg += " ⚠️ Matching notes limited to the 2000 most recent for performance (other notes from those days are shown on top of that). Refine your search to see more results."
                 st.success(result_msg)
 
                 if me_groups:
@@ -1113,6 +1145,12 @@ if st.sidebar.button("Run Search", type="primary"):
                                 sub_df['body'] = sub_df['body'].apply(clean_body_text_for_display)
                                 sub_df['body'] = sub_df['body'].apply(lambda x: highlight_matches(x, search_fields))
                                 sub_df['body'] = sub_df['body'].apply(render_links_only)
+                                sub_df['body'] = [
+                                    b if m else
+                                    f'<div style="font-size: 0.85em; font-style: italic; color: #6c757d; margin-bottom: 4px;">'
+                                    f'Same-day note (does not mention search terms)</div>{b}'
+                                    for b, m in zip(sub_df['body'], g['group_df']['matches_search'])
+                                ]
                                 sub_df['context'] = [
                                     add_ecore_note_link(c, current_market, me_id, d)
                                     for c, d in zip(sub_df['context'], sub_df['dt'])
