@@ -10,12 +10,16 @@ To check that it starts:  .venv/bin/python mcp_server.py   (then Ctrl-C)
 """
 
 import datetime
+import functools
+import logging
 import os
 import time
 
 import pandas as pd
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from sqlalchemy.exc import DBAPIError
 
 from lib import autoflow
 from lib import constraint_drivers as drivers
@@ -98,6 +102,59 @@ def _link_graph() -> dict:
     return _link_graph_cache[1]
 
 
+# MySQL client errors that mean the database could not be reached: can't connect, server has gone
+# away, lost connection. With the SSH tunnel closed, connecting to its local port gives 2003.
+CONNECTION_ERROR_CODES = {2003, 2005, 2006, 2013}
+ACCESS_DENIED_CODE = 1045
+
+log = logging.getLogger(__name__)
+
+
+def _db_address() -> str:
+    try:
+        _, host, port, database = db.settings()
+        return f"{database} at {host}:{port}"
+    except Exception:
+        return "the database"
+
+
+def _readable_errors(fn):
+    """Turns a tool's failures into ToolError, whose message reaches the client.
+
+    The MCP SDK reports any other exception as a bare "Error executing tool <name>", which is
+    how a closed SSH tunnel used to look: the reason only reached the server log.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except db.ConfigError as e:
+            raise ToolError(f"Database settings problem: {e}") from e
+        except DBAPIError as e:
+            orig = getattr(e, "orig", None)
+            code = orig.args[0] if orig is not None and getattr(orig, "args", None) else None
+            orig_args = getattr(orig, "args", None) or ()
+            detail = (f"MySQL error {code}: {orig_args[1]}" if code is not None and len(orig_args) > 1
+                      else str(orig if orig is not None else e).splitlines()[0])
+            if code in CONNECTION_ERROR_CODES or e.connection_invalidated:
+                raise ToolError(
+                    f"Can't reach {_db_address()}, so the SSH tunnel is probably not open. Start the tunnel "
+                    f"and try again; this is not a problem with the request. ({detail})") from e
+            if code == ACCESS_DENIED_CODE:
+                raise ToolError(f"The database refused the login. Check the username and password in the "
+                                f"extension settings (or config/mysql.yml). ({detail})") from e
+            log.exception("Database error in %s", fn.__name__)
+            raise ToolError(f"Database error: {detail}") from e
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        except Exception as e:
+            log.exception("Unexpected error in %s", fn.__name__)
+            raise ToolError(f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}") from e
+    return wrapper
+
+
 def _check_choice(name: str, value: str, choices) -> None:
     if value not in choices:
         raise ValueError(f"Unknown {name} '{value}'. Use one of: {', '.join(choices)}")
@@ -120,6 +177,7 @@ def _fmt_dt(value) -> str:
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = None,
                           include_ignored: bool = False, check_history: bool = True) -> str:
     """List transmission outages planned to start on one day, one row per equipment ID.
@@ -182,6 +240,7 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipment",
                              notes_market: str | None = None, lookback: str = "3 Years", context: str = "All",
                              max_notes_per_element: int = 25) -> str:
@@ -267,6 +326,7 @@ def _tsv(df: pd.DataFrame, columns: list[str], decimals: int = 0) -> list[str]:
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def list_binding_constraints(market: str, date: str | None = None, kind: str = "rt", limit: int = 15) -> str:
     """Constraints that bound on one day, largest absolute daily shadow price total first,
     with each monitored element's binding history for comparison.
@@ -335,6 +395,7 @@ def _market_conditions_section(eng, market: str, day: datetime.date, shadow: pd.
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_market_conditions(market: str, date: str | None = None, forecasts: str | None = None) -> str:
     """Hourly market-wide conditions for a day: actual DA and RT system energy prices, our
     energy price forecasts (RTEP, DAEP) as they stood at the day-ahead deadline, RT minus
@@ -363,6 +424,7 @@ def get_market_conditions(market: str, date: str | None = None, forecasts: str |
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_shadow_forecasts(market: str, constraint_id: int | None = None, date: str | None = None, days_ahead: int = 1,
                          limit: int = 25) -> str:
     """The desk's RT shadow price forecasts for a day, with actual RT shadow prices where the
@@ -431,6 +493,7 @@ def get_shadow_forecasts(market: str, constraint_id: int | None = None, date: st
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_forecast_accuracy(market: str, start_date: str | None = None, end_date: str | None = None, by: str = "element",
                           min_total: float = 1000, limit: int = 15) -> str:
     """How well the desk's RT shadow price forecasts did over a date range: the biggest misses,
@@ -530,6 +593,7 @@ def _outage_condition_parts(eng, market: str, condition: tuple, names: dict, war
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_forecast_model(market: str, constraint_id: int, date: str | None = None, days_ahead: int = 1,
                        all_details: bool = False) -> str:
     """The regression models behind a constraint's RT shadow price forecast for a day: its
@@ -684,6 +748,7 @@ def get_forecast_model(market: str, constraint_id: int, date: str | None = None,
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_monitored_element(market: str, me_id: int, max_description_chars: int = 4000) -> str:
     """One monitored element: name, type, stations and areas, the same equipment in the other
     direction, the desk's description from its EnergyCore page, the elements its description
@@ -845,6 +910,7 @@ def _autoflow_section(eng, market: str, constraint_id: int, day: datetime.date, 
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_autoflow(market: str, constraint_id: int, start_date: str | None = None, end_date: str | None = None,
                  source: str = "pseudo_actuals", vendor: str = "meteologica", coefficient_types: str = "solar,wind,load",
                  leverage_side: str = "all", threshold_min: float | None = None, threshold_max: float | None = None,
@@ -1042,6 +1108,7 @@ def _outage_sections(eng, market: str, constraint_id: int, day: datetime.date, k
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_outage_impacts(market: str, constraint_id: int, date: str | None = None, start_hr: int = 1, end_hr: int = 24,
                        top: int = 20) -> str:
     """How much each transmission outage in effect loads one constraint, from EnergyCore's
@@ -1085,6 +1152,7 @@ def get_outage_impacts(market: str, constraint_id: int, date: str | None = None,
 
 
 @server.tool(annotations=READ_ONLY)
+@_readable_errors
 def get_constraint_drivers(market: str, constraint_id: int, date: str | None = None, kind: str = "rt",
                            base_hr: int | None = None, compare_hr: int | None = None, source: str = "auto",
                            autoflow_source: str = "pseudo_actuals", include_outages: bool = True,

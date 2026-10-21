@@ -15,6 +15,7 @@ import re
 
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from lib import outage_search as osearch
 
@@ -67,6 +68,9 @@ def link_graph(engine, warn=_no_warn) -> dict[tuple[str, int], list[dict]]:
                     SELECT official_monitored_element_id, description FROM {market}_monelem_meta
                     WHERE description LIKE '%monitored_elements%'
                 """)).fetchall()
+        except OperationalError:
+            # The database is unreachable (tunnel closed): fail, rather than cache an empty graph.
+            raise
         except Exception as e:
             warn(f"Could not read {market.upper()} monitored element descriptions: {e}")
             continue
