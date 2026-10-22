@@ -456,6 +456,55 @@ def filter_notes(notes_df: pd.DataFrame, search_fields, context_option: str, sta
     return df[mask].copy()
 
 
+class NoteIndex:
+    """Runs filter_notes(notes_df, terms, "All", start_date_str) for many searches at once.
+
+    filter_notes scans every note with a regex for each search, which takes minutes for a
+    day's outages. A term's regex (format_regex_pattern) only matches where each of the term's
+    words appears as a whole word, so this indexes the notes by word and runs the same regex
+    on just the notes holding the term's rarest word. The result is the same; only the notes
+    scanned differ.
+    """
+
+    def __init__(self, notes_df: pd.DataFrame, start_date_str):
+        df = notes_df
+        if start_date_str and not df.empty:
+            df = df[df['dt'] >= pd.to_datetime(start_date_str)]
+        self._bodies = df['body'].fillna("") if not df.empty else pd.Series(dtype=object)
+        self._words = None
+        self._by_term = {}
+
+    def _word_index(self) -> dict:
+        if self._words is None:
+            self._words = {}
+            for label, words in self._bodies.str.lower().str.findall(r"\w+").items():
+                for w in set(words):
+                    self._words.setdefault(w, []).append(label)
+        return self._words
+
+    def _term_rows(self, term: str) -> set:
+        if term not in self._by_term:
+            words = re.findall(r"\w+", term.lower())
+            notes = self._bodies
+            if words:
+                index = self._word_index()
+                notes = notes.loc[min((index.get(w, []) for w in words), key=len)]
+            mask = notes.str.contains(format_regex_pattern(term), case=False, na=False, regex=True)
+            self._by_term[term] = set(notes.index[mask])
+        return self._by_term[term]
+
+    def rows(self, search_fields) -> set:
+        """Index labels of the notes that match any of the terms."""
+        found = set()
+        for term in search_fields:
+            if term.strip():
+                found |= self._term_rows(term.strip())
+        return found
+
+    def count(self, search_fields) -> int:
+        return len(self.rows(search_fields))
+
+
 def execute_main_search_query(engine, notes_df: pd.DataFrame, current_market: str, search_fields,
                               context_option: str, start_date_str: str,
                               result_limit: int = 500) -> tuple[pd.DataFrame, bool]:
@@ -613,6 +662,17 @@ def build_search_fields(engine, search_type: str, raw_input_id: str, current_mar
             if outage_market not in ["spp", "pjm"]:
                 raw_group_ids.append(f"GID {cleaned_num}")
 
+    search_fields = _id_search_fields(engine, current_market, outage_market, raw_eq_ids, raw_group_ids, warn)
+
+    return list(dict.fromkeys(search_fields)), raw_eq_ids, raw_group_ids
+
+
+def _id_search_fields(engine, current_market: str, outage_market: str, raw_eq_ids: list[str],
+                      raw_group_ids: list[str], warn=_no_warn) -> list[str]:
+    """Note search terms for outage equipment IDs and "GID n" group labels, using the outage
+    market's notation rules (and the current market's, when the two differ)."""
+    search_fields = []
+
     # SPECIAL CASE 1: Current Market = SPP and Outage Market = MISO
     if current_market == "spp" and outage_market == "miso":
         if raw_eq_ids:
@@ -709,15 +769,83 @@ def build_search_fields(engine, search_type: str, raw_input_id: str, current_mar
                         spp_params = {f"e{i}": eq for i, eq in enumerate(raw_eq_ids)}
                         spp_res = conn.execute(spp_query, spp_params).fetchall()
 
-                        for row in spp_res:
-                            if row[1] is not None and str(row[1]).strip():
-                                ems_name = str(row[1]).strip()
-                                search_fields.append(ems_name)
-                                search_fields.append(f"{row[0]} {ems_name.split()[0]}")
+                        search_fields.extend(_spp_name_terms(spp_res))
                 except Exception as e:
                     warn(f"Could not fetch SPP EMS equipment names: {e}")
 
-    return list(dict.fromkeys(search_fields)), raw_eq_ids, raw_group_ids
+    return search_fields
+
+
+def _spp_name_terms(rows) -> list[str]:
+    """SPP terms for (outage_equipment_id, ems_equipment_name) rows: the EMS name, and the ID
+    plus the name's first word."""
+    terms = []
+    for eq_id, name in rows:
+        if name is not None and str(name).strip():
+            ems_name = str(name).strip()
+            terms += [ems_name, f"{eq_id} {ems_name.split()[0]}"]
+    return terms
+
+
+def equipment_search_fields(engine, market: str, eq_ids, warn=_no_warn) -> dict[str, list[str]]:
+    """build_search_fields(engine, "Equipment ID", e, market, market)[0] for many equipment IDs.
+    SPP's terms need each outage's EMS name; this gets them all in one query."""
+    if market != "spp":
+        return {e: build_search_fields(engine, "Equipment ID", e, market, market, warn=warn)[0] for e in eq_ids}
+    ids = {e: clean_id(str(e)) for e in eq_ids}
+    rows = {}
+    wanted = sorted(set(ids.values()) - {""})
+    if wanted:
+        try:
+            with engine.connect() as conn:
+                placeholders = ", ".join(f":e{i}" for i in range(len(wanted)))
+                for row in conn.execute(text(f"""
+                    SELECT outage_equipment_id, ems_equipment_name FROM spp_transmission_outages
+                    WHERE outage_equipment_id IN ({placeholders})
+                """), {f"e{i}": e for i, e in enumerate(wanted)}).fetchall():
+                    rows.setdefault(str(row[0]), []).append(row)
+        except Exception as e:
+            warn(f"Could not fetch SPP EMS equipment names: {e}")
+    return {e: list(dict.fromkeys(_spp_name_terms(rows.get(i, [])))) for e, i in ids.items()}
+
+
+def group_search_fields(engine, market: str, group_ids, warn=_no_warn) -> dict[str, list[str]]:
+    """build_search_fields(engine, "Group ID", g, market, market)[0] for many groups, with two
+    queries in all instead of two per group."""
+    group_ids = sorted({clean_id(str(g)) for g in group_ids} - {""})
+    if not group_ids:
+        return {}
+    associated, members = {g: [] for g in group_ids}, {}
+    try:
+        with engine.connect() as conn:
+            placeholders = ", ".join(f":g{i}" for i in range(len(group_ids)))
+            for gid, assoc in conn.execute(text(f"""
+                SELECT group_id, associated_group_id FROM {market}_outage_group_associations
+                WHERE group_id IN ({placeholders})
+            """), {f"g{i}": g for i, g in enumerate(group_ids)}).fetchall():
+                if assoc is not None:
+                    associated[str(gid)].append(str(assoc))
+            every = sorted({g for gid in group_ids for g in [gid] + associated[gid]})
+            placeholders = ", ".join(f":g{i}" for i in range(len(every)))
+            for gid, eq in conn.execute(text(f"""
+                SELECT outage_equipment_group_id, outage_equipment_id FROM {market}_outage_equipment_group_members
+                WHERE outage_equipment_group_id IN ({placeholders})
+            """), {f"g{i}": g for i, g in enumerate(every)}).fetchall():
+                if eq is not None:
+                    members.setdefault(str(gid), []).append(str(eq))
+    except Exception as e:
+        warn(f"Could not fetch group associations or equipment members: {e}")
+        gid_only = market not in ["spp", "pjm"]
+        return {g: [f"GID {g}"] if gid_only else [] for g in group_ids}
+
+    fields = {}
+    for gid in group_ids:
+        all_group_ids = list(dict.fromkeys([gid] + associated[gid]))
+        raw_group_ids = [f"GID {g}" for g in all_group_ids] if market not in ["spp", "pjm"] else []
+        raw_eq_ids = [eq for g in all_group_ids for eq in members.get(g, [])]
+        fields[gid] = list(dict.fromkeys(_id_search_fields(engine, market, market, raw_eq_ids, raw_group_ids, warn)))
+    return fields
+
 
 
 # --- RESULT ASSEMBLY ---

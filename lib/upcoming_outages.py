@@ -87,22 +87,35 @@ def _table_columns(conn, table: str) -> set:
     return {r[0] for r in conn.execute(text(f"SHOW COLUMNS FROM {table}")).fetchall()}
 
 
-def list_upcoming_outages(engine, market: str, target_date: datetime.date, apply_ignore_rules: bool = True,
-                          warn=_no_warn) -> list[dict]:
-    """Transmission outages on the current report (most_recent = 1) with planned_start on
-    ``target_date``, one entry per equipment ID, ordered by planned start.
+# Which outages a day's list holds. Times are compared as stored, in market local time;
+# actual times replace planned ones once the ISO reports them.
+WINDOWS = {
+    "starts": "t.planned_start >= :day_start AND t.planned_start < :day_end",
+    "ends": "COALESCE(t.actual_end, t.planned_end) >= :day_start AND COALESCE(t.actual_end, t.planned_end) < :day_end",
+    "in_effect": "COALESCE(t.actual_start, t.planned_start) < :day_end "
+                 "AND (COALESCE(t.actual_end, t.planned_end) IS NULL OR COALESCE(t.actual_end, t.planned_end) >= :day_start)",
+}
 
-    ``target_date`` is compared with planned_start as stored, which is market local time.
+
+def list_upcoming_outages(engine, market: str, target_date: datetime.date, apply_ignore_rules: bool = True,
+                          warn=_no_warn, window: str = "starts") -> list[dict]:
+    """Transmission outages on the current report (most_recent = 1) for ``target_date``, one
+    entry per equipment ID, ordered by planned start.
+
+    ``window`` picks which: ``starts`` (planned_start on the day), ``ends`` (ending on the
+    day), or ``in_effect`` (out at any time during the day); see WINDOWS.
     """
     if market not in osearch.MARKETS:
         raise ValueError(f"Unknown market '{market}'. Use one of: {', '.join(osearch.MARKETS)}")
+    if window not in WINDOWS:
+        raise ValueError(f"Unknown window '{window}'. Use one of: {', '.join(WINDOWS)}")
 
     table = f"{market}_transmission_outages"
     name_cols = [c for c in osearch.OUTAGE_NAME_COLUMNS[market] if c not in ("kv",)]
     select_cols = ["outage_equipment_id", "outage_request_id", "request_status", "planned_start", "planned_end",
                    "equipment_type", "kv"] + name_cols
 
-    where = ["t.most_recent = 1", "t.planned_start >= :day_start", "t.planned_start < :day_end"]
+    where = ["t.most_recent = 1", WINDOWS[window]]
     params = {"day_start": target_date, "day_end": target_date + datetime.timedelta(days=1)}
 
     with engine.connect() as conn:
@@ -179,7 +192,10 @@ def add_history(engine, market: str, outages: list[dict], notes_df: pd.DataFrame
                 warn=_no_warn) -> None:
     """Adds what the outage documentation would find for each outage, so empty ones can be skipped:
 
-    - 'note_matches': quick notes found by the same equipment-ID search as the outage search page
+    - 'note_matches': quick notes found by the outage search's Equipment ID search
+    - 'group_note_matches': quick notes found by its Group ID search on any of the outage's
+      groups (call add_group_ids first). MISO notes usually name an outage by group (GID), so
+      this finds far more than the equipment search.
     - 'annotations': non-archived outage annotations
     - 'flag_type': the latest transmission outage flag type ('' if none; PJM has no flags)
     """
@@ -207,12 +223,25 @@ def add_history(engine, market: str, outages: list[dict], notes_df: pd.DataFrame
     except Exception as e:
         warn(f"Could not count outage annotations for {market.upper()}: {e}")
 
-    flags = {f["outage_id"]: f for f in osearch.fetch_transmission_outage_flags(engine, market, ids, warn=warn)}
+    add_flags(engine, market, outages, warn)
 
+    index = osearch.NoteIndex(notes_df, start_date_str)
+    group_fields = osearch.group_search_fields(engine, market, {g for o in outages for g in o.get("group_ids", [])},
+                                               warn=warn)
+    eq_fields = osearch.equipment_search_fields(engine, market, ids, warn=warn)
     for o in outages:
         eq_id = o["outage_equipment_id"]
-        search_fields, _, _ = osearch.build_search_fields(engine, "Equipment ID", eq_id, market, market, warn=warn)
-        o["note_matches"] = len(osearch.filter_notes(notes_df, search_fields, "All", start_date_str)) \
-            if search_fields else 0
+        o["note_matches"] = index.count(eq_fields[eq_id])
+        o["group_note_matches"] = index.count([f for g in o.get("group_ids", []) for f in group_fields.get(g, [])])
         o["annotations"] = annotation_counts.get(eq_id, 0)
-        o["flag_type"] = flags[eq_id]["flag_type"] or "flag" if eq_id in flags else ""
+
+
+def add_flags(engine, market: str, outages: list[dict], warn=_no_warn) -> None:
+    """Adds 'flag_type': the latest transmission outage flag type ('' if none, 'flag' for a
+    flag with no type; PJM has no flags)."""
+    flags = {f["outage_id"]: f for f in
+             osearch.fetch_transmission_outage_flags(engine, market, [o["outage_equipment_id"] for o in outages],
+                                                     warn=warn)}
+    for o in outages:
+        eq_id = o["outage_equipment_id"]
+        o["flag_type"] = (flags[eq_id]["flag_type"] or "flag") if eq_id in flags else ""

@@ -157,9 +157,44 @@ def _outages_with_branches(engine, market: str, version, start, end, warn) -> tu
     return outages, mapping
 
 
-def outage_impacts(engine, market: str, constraint_id: int, start: datetime.datetime, end: datetime.datetime,
-                   day: datetime.date, peak_hr: int | None = None, warn=_no_warn) -> tuple[dict, pd.DataFrame]:
+def _outage_name(engine, market: str, equipment_id: int) -> str:
+    """The outage's name from its latest outage report row, or the bare ID."""
+    cols = osearch.OUTAGE_NAME_COLUMNS.get(market, [])
+    if cols:
+        with engine.connect() as conn:
+            row = conn.execute(text(f"""
+                SELECT {", ".join(f"`{c}`" for c in cols)} FROM {market}_transmission_outages
+                WHERE outage_equipment_id = :e ORDER BY id DESC LIMIT 1
+            """), {"e": equipment_id}).mappings().fetchone()
+        if row:
+            return osearch.format_outage_name(market, row)
+    return str(equipment_id)
+
+
+def _add_outage(engine, market: str, version, outages: pd.DataFrame, mapping: pd.DataFrame, key: str,
+                warn) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Adds an outage that is not in effect, so its impact can still be computed."""
+    src, eq = key.split(":")
+    if src == market:
+        mp = network.outage_branches(engine, market, version, [int(eq)])
+    else:
+        mp = network.neighbor_outage_branches(engine, market, version, src, [int(eq)], warn)
+    row = {"outage_equipment_id": int(eq), "name": _outage_name(engine, src, int(eq)), "in_active": False,
+           "request_status": "not in effect", "start": pd.NaT, "end": pd.NaT, "market": src, "outage_key": key}
+    outages = pd.concat([outages, pd.DataFrame([row])], ignore_index=True)
+    mapping = pd.concat([mapping, mp.assign(outage_key=key)[["outage_key", "pw_branch_id"]]], ignore_index=True)
+    return outages, mapping
+
+
+def outage_impacts(engine, market: str, constraint_id: int | None, start: datetime.datetime, end: datetime.datetime,
+                   day: datetime.date, peak_hr: int | None = None, warn=_no_warn, me_id: int | None = None,
+                   outage_key: str | None = None) -> tuple[dict, pd.DataFrame]:
     """How much each outage in effect loads the constraint in the network model.
+
+    Give ``constraint_id``, or ``me_id`` alone to use the monitored element with the
+    contingency of its latest constraint (see network.monitored_element_definition).
+    ``outage_key`` ("market:equipment_id") is always computed, even when it would be
+    screened out or is not in effect on the day; its row has it in ``outage_keys``.
 
     Returns (summary, impacts). The summary has the case version, monitored branch,
     contingency branches, limit, base pre- and post-contingency flows, and the flow with all
@@ -170,7 +205,11 @@ def outage_impacts(engine, market: str, constraint_id: int, start: datetime.date
     in_combination_mw, in_combination_pct].
     """
     summary = {"version": None}
-    defn = network.constraint_definition(engine, market, constraint_id, warn)
+    if constraint_id is not None:
+        defn = network.constraint_definition(engine, market, constraint_id, warn)
+        defn["constraint_id"] = constraint_id
+    else:
+        defn = network.monitored_element_definition(engine, market, me_id, warn)
     summary.update(defn)
     if defn["me_id"] is None:
         warn(f"Constraint {constraint_id} has no monitored element, so outage impacts cannot be computed.")
@@ -192,10 +231,14 @@ def outage_impacts(engine, market: str, constraint_id: int, start: datetime.date
     outages, mapping = _outages_with_branches(engine, market, version, start, end, warn)
     summary["outages_in_effect"] = len(outages)
     summary["outages_mapped"] = mapping["outage_key"].nunique()
+    if outage_key and (outages.empty or outage_key not in set(outages["outage_key"])):
+        warn(f"Outage {outage_key} is not in effect in this period; its impact is computed as if it were.")
+        outages, mapping = _add_outage(engine, market, version, outages, mapping, outage_key, warn)
     if outages.empty:
         return summary, pd.DataFrame()
     names = outages.set_index("outage_key")["name"].astype(str)
 
+    mapped_keys = set(mapping["outage_key"])
     ctg_out = mapping[mapping["pw_branch_id"].isin(ctg)]["outage_key"].unique()
     if len(ctg_out):
         warn("Part of the contingency is itself on outage: " + ", ".join(names.reindex(ctg_out).fillna("?")) + ".")
@@ -222,6 +265,12 @@ def outage_impacts(engine, market: str, constraint_id: int, start: datetime.date
     sig_sets = distinct[est >= MIN_SCREEN_MW].reindex(est[est >= MIN_SCREEN_MW].sort_values(ascending=False).index)
     sig_sets = list(sig_sets.head(MAX_EXACT_OUTAGES))
     summary["outages_screened_in"] = len(sig_sets)
+    if outage_key:
+        if outage_key not in branch_sets.index:
+            warn(f"Outage {outage_key} " + ("is the monitored element or part of the contingency."
+                                             if outage_key in mapped_keys else "is not mapped to the network model."))
+        elif branch_sets[outage_key] not in sig_sets:
+            sig_sets.append(branch_sets[outage_key])
 
     base_pre = float(flows.get(m, 0.0))
     needed = sorted({b for bs in sig_sets for b in bs})
@@ -247,6 +296,7 @@ def outage_impacts(engine, market: str, constraint_id: int, start: datetime.date
         post_k = network.flow_after_outages(flows, full, m, ctg + list(bs), warn)
         without_k = network.flow_after_outages(flows, full, m, [b for b in every if b not in bs], warn)
         rows.append({
+            "outage_keys": keys,
             "market": lead["market"],
             "outage_equipment_id": int(lead["outage_equipment_id"]),
             "name": " / ".join(dict.fromkeys(group["name"].astype(str))),

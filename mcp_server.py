@@ -13,6 +13,7 @@ import datetime
 import functools
 import logging
 import os
+import threading
 import time
 
 import pandas as pd
@@ -65,7 +66,8 @@ server = MCPServer(
         "get_autoflow gives autoflow over a date range; get_shadow_forecasts gives the desk's RT shadow price "
         "forecasts for a day, get_forecast_model shows the models and features behind a constraint's forecast, "
         "and get_forecast_accuracy scores the forecasts against actuals over a date range; "
-        "get_outage_impacts checks outages (including planned ones on future days) against a constraint. "
+        "get_outage_impacts checks outages (including planned ones on future days) against a constraint or "
+        "monitored element, or one monitored element/outage pair with outage_id. "
         "Constraint, monitored element, and outage names in the output are often markdown links to their "
         "EnergyCore pages; keep those links when you mention them in your answer. get_monitored_element gives an "
         "element's description and the elements it is linked to, often the same line in another market under a "
@@ -75,6 +77,7 @@ server = MCPServer(
 
 _engine = None
 _notes_cache = {}
+_notes_locks = {m: threading.Lock() for m in osearch.MARKETS}
 _link_graph_cache = None
 
 
@@ -86,12 +89,24 @@ def engine():
 
 
 def market_notes(market: str) -> pd.DataFrame:
-    """All quick notes for a market, reloaded after NOTES_CACHE_SECONDS. The first load takes about a minute."""
-    loaded = _notes_cache.get(market)
-    if loaded is None or time.time() - loaded[0] > NOTES_CACHE_SECONDS:
-        loaded = (time.time(), osearch.load_market_notes(engine(), market))
-        _notes_cache[market] = loaded
-    return loaded[1]
+    """All quick notes for a market, reloaded after NOTES_CACHE_SECONDS. A load takes 20 seconds
+    or more; a call that arrives during one waits for it instead of starting another."""
+    with _notes_locks[market]:
+        loaded = _notes_cache.get(market)
+        if loaded is None or time.time() - loaded[0] > NOTES_CACHE_SECONDS:
+            loaded = (time.time(), osearch.load_market_notes(engine(), market))
+            _notes_cache[market] = loaded
+        return loaded[1]
+
+
+def _preload_notes() -> None:
+    """Loads every market's notes at startup, so the first tool call does not wait for them.
+    A failed load (say, the tunnel is closed) is left for the first call to retry."""
+    for market in osearch.MARKETS:
+        try:
+            market_notes(market)
+        except Exception:
+            log.warning("Could not preload %s notes", market, exc_info=True)
 
 
 def _link_graph() -> dict:
@@ -179,28 +194,53 @@ def _fmt_dt(value) -> str:
 @server.tool(annotations=READ_ONLY)
 @_readable_errors
 def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = None,
-                          include_ignored: bool = False, check_history: bool = True) -> str:
-    """List transmission outages planned to start on one day, one row per equipment ID.
+                          include_ignored: bool = False, check_history: bool = True, window: str = "starts",
+                          equipment_types: list[str] | None = None, min_kv: float | None = None,
+                          flags: list[str] | None = None) -> str:
+    """List transmission outages for one day, one row per equipment ID.
 
     Args:
         market: miso, spp, pjm, ercot, or caiso.
         days_ahead: Days from today (2 = T+2). Ignored when date is given.
-        date: A specific day, YYYY-MM-DD. Compared with planned_start in market local time.
+        date: A specific day, YYYY-MM-DD, in market local time.
         include_ignored: Also list outages that EnergyCore's regression ignore rules drop
             (for example cancelled or denied requests, and CAISO hot-line work).
-        check_history: Count note matches, annotations, and flags for each outage. The first
-            call for a market loads its notes, which takes about a minute.
+        check_history: Count note matches, group note matches, annotations, and flags for
+            each outage.
+        window: starts (planned to start on the day), ends (ending on the day), or in_effect
+            (out at any time during the day). ends and in_effect use actual times where known.
+        equipment_types: Only these equipment types, for example ["Line", "Transformer"].
+            Most MISO outages are circuit breakers.
+        min_kv: Only outages at this voltage or higher.
+        flags: Only outages whose latest desk flag is one of these, for example
+            ["alert", "watch"]. MISO and SPP flag types: alert, watch, safe, auto_alert,
+            auto_watch, auto_safe. PJM has no flags.
 
-    Returns tab-separated rows. Outages with note_matches, annotations, and flag all empty
-    have no history, so get_outage_documentation would return nothing useful for them.
+    Returns tab-separated rows. note_matches counts notes naming the equipment ID;
+    group_note_matches counts notes naming any of its groups. MISO notes usually name an
+    outage by group (GID), so for an outage with group_note_matches, call
+    get_outage_documentation with id_type="group" and each of its group_ids. Outages with
+    note_matches, group_note_matches, annotations, and flag all empty have no history, so
+    get_outage_documentation would return nothing useful for them.
     """
     _check_choice("market", market, osearch.MARKETS)
+    _check_choice("window", window, upcoming_outages.WINDOWS)
     target_date = _resolve_date(date, days_ahead)
     warnings = []
 
     outages = upcoming_outages.list_upcoming_outages(engine(), market, target_date,
                                                      apply_ignore_rules=not include_ignored,
-                                                     warn=warnings.append)
+                                                     warn=warnings.append, window=window)
+    listed = len(outages)
+    if equipment_types:
+        wanted = {t.strip().lower() for t in equipment_types}
+        outages = [o for o in outages if o["equipment_type"].strip().lower() in wanted]
+    if min_kv is not None:
+        outages = [o for o in outages if o["kv"] is not None and float(o["kv"]) >= min_kv]
+    if flags:
+        upcoming_outages.add_flags(engine(), market, outages, warn=warnings.append)
+        wanted = {f.strip().lower() for f in flags}
+        outages = [o for o in outages if o["flag_type"].lower() in wanted]
     upcoming_outages.add_group_ids(engine(), market, outages, warn=warnings.append)
 
     lookback = "3 Years"
@@ -209,21 +249,28 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
         upcoming_outages.add_history(engine(), market, outages, market_notes(market),
                                      start_date.strftime("%Y-%m-%d"), warn=warnings.append)
 
+    window_text = {"starts": "Planned start date", "ends": "End date", "in_effect": "In effect on"}[window]
+    filters = [f"types {', '.join(equipment_types)}" if equipment_types else "",
+               f"kV >= {min_kv:g}" if min_kv is not None else "", f"flag {', '.join(flags)}" if flags else ""]
     lines = [
         f"Market: {market.upper()}",
-        f"Planned start date: {target_date.isoformat()}",
+        f"{window_text}: {target_date.isoformat()}",
         "Filter: current report (most_recent = 1); "
-        + ("ignore rules NOT applied" if include_ignored else "EnergyCore regression_ignore_rules applied"),
-        f"Outages: {len(outages)}",
+        + ("ignore rules NOT applied" if include_ignored else "EnergyCore regression_ignore_rules applied")
+        + "".join(f"; {f}" for f in filters if f),
+        f"Outages: {len(outages)}" + (f" (of {listed} before the type, kV, and flag filters)" if listed != len(outages) else ""),
     ]
     if check_history:
-        with_history = [o for o in outages if o["note_matches"] or o["annotations"] or o["flag_type"]]
+        with_history = [o for o in outages
+                        if o["note_matches"] or o["group_note_matches"] or o["annotations"] or o["flag_type"]]
         lines.append(f"With history (note lookback {lookback}): {len(with_history)}")
 
     header = ["equipment_id", "name", "equipment_type", "kv", "planned_start", "planned_end", "request_status",
               "request_ids", "group_ids"]
     if check_history:
-        header += ["note_matches", "annotations", "flag"]
+        header += ["note_matches", "group_note_matches", "annotations", "flag"]
+    elif flags:
+        header += ["flag"]
     lines += ["", "\t".join(header)]
 
     for o in outages:
@@ -233,7 +280,9 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
                _fmt_dt(o["planned_start"]), _fmt_dt(o["planned_end"]), ", ".join(o["request_statuses"]),
                ", ".join(str(r) for r in o["request_ids"]), ", ".join(groups)]
         if check_history:
-            row += [str(o["note_matches"]), str(o["annotations"]), o["flag_type"]]
+            row += [str(o["note_matches"]), str(o["group_note_matches"]), str(o["annotations"]), o["flag_type"]]
+        elif flags:
+            row += [o["flag_type"]]
         lines.append("\t".join(row))
 
     return "\n".join(lines + _warnings_section(warnings))
@@ -250,9 +299,15 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     It has the match fields, flag notes, outage annotations, quick notes that mention the
     outage (with summed shadow prices), and monitored element descriptions.
 
+    MISO desk notes usually name an outage by its group ("GID 2972"), not its equipment ID,
+    so an equipment search often finds no notes for an outage that has plenty. For an outage
+    with group IDs (list_upcoming_outages gives them, with group_note_matches), search by
+    group: one call per group ID. A group search also finds the notes naming the group's
+    member equipment.
+
     Args:
         market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
-        outage_id: Equipment ID, group ID, or search text, depending on id_type.
+        outage_id: One equipment ID, one group ID, or search text, depending on id_type.
         id_type: equipment, group, or text (comma-separated search terms).
         notes_market: Market whose notes and shadow prices to search, when different from the
             outage market (for example MISO outages in SPP or PJM notes). Default: market.
@@ -1109,31 +1164,59 @@ def _outage_sections(eng, market: str, constraint_id: int, day: datetime.date, k
 
 @server.tool(annotations=READ_ONLY)
 @_readable_errors
-def get_outage_impacts(market: str, constraint_id: int, date: str | None = None, start_hr: int = 1, end_hr: int = 24,
-                       top: int = 20) -> str:
-    """How much each transmission outage in effect loads one constraint, from EnergyCore's
-    PowerWorld network model (LODFs), including the constraint's contingency. Works for future
-    days too, using planned outages, so it can check an upcoming outage against a constraint.
+def get_outage_impacts(market: str, constraint_id: int | None = None, date: str | None = None, start_hr: int = 1,
+                       end_hr: int = 24, top: int = 20, monitored_element_id: int | None = None,
+                       outage_id: int | None = None, outage_market: str | None = None) -> str:
+    """How much each transmission outage in effect loads one constraint or monitored element,
+    from EnergyCore's PowerWorld network model. Works for future days too, using planned
+    outages, so it can check an upcoming outage against an element.
+
+    Columns: pre_ctg_lodf_pct is the plain LODF from the outage to the monitored element, the
+    same number as EnergyCore's LODF tool. individual_mw is the change in post-contingency
+    flow from this outage alone, and in_combination_mw what it adds on top of the other
+    outages; both include the constraint's contingency.
 
     Args:
         market: miso, spp, pjm, ercot, or caiso. MISO also includes mapped SPP and PJM outages.
-        constraint_id: Official constraint ID.
+        constraint_id: Official constraint ID. Give this or monitored_element_id.
         date: The day, YYYY-MM-DD. Default: two days ago, the latest day with complete data.
         start_hr: First hour ending of the period to collect outages for.
         end_hr: Last hour ending of the period.
         top: Most outages to list.
+        monitored_element_id: Official monitored element ID, instead of constraint_id. The
+            contingency comes from the element's most recently used constraint.
+        outage_id: Show only this outage equipment ID: one monitored element/outage pair. It is
+            computed even when it is too small to make the list or is not in effect that day.
+        outage_market: Market of outage_id, when it is a neighbor's (MISO: spp or pjm).
+            Default: market.
     """
     _check_choice("market", market, osearch.MARKETS)
+    if (constraint_id is None) == (monitored_element_id is None):
+        raise ValueError("Give either constraint_id or monitored_element_id.")
+    outage_market = outage_market or market
+    _check_choice("outage_market", outage_market, (market,) + outage_impacts.NEIGHBOR_MARKETS.get(market, ()))
+    outage_key = f"{outage_market}:{int(outage_id)}" if outage_id is not None else None
     day = _resolve_date(date, ANALYSIS_DAYS_AHEAD)
     warnings = []
     eng = engine()
     start = datetime.datetime.combine(day, datetime.time()) + datetime.timedelta(hours=start_hr - 1)
     end = datetime.datetime.combine(day, datetime.time()) + datetime.timedelta(hours=end_hr)
     summary, impacts = outage_impacts.outage_impacts(eng, market, constraint_id, start, end, day, end_hr,
-                                                     warn=warnings.append)
-    lines = [f"=== Outage impacts on {market.upper()} "
-             f"{_constraint_title(market, constraint_id, summary.get('name'), summary.get('me_id'), day)}, "
-             f"{day} HE{start_hr}-HE{end_hr} ==="]
+                                                     warn=warnings.append, me_id=monitored_element_id,
+                                                     outage_key=outage_key)
+    used_constraint = summary.get("constraint_id")
+    if constraint_id is not None or used_constraint is not None:
+        subject = _constraint_title(market, used_constraint, summary.get("name"), summary.get("me_id"), day)
+    else:
+        me_id = summary.get("me_id")
+        subject = (f"monitored element {links.md(me_id, links.monitored_element(market, me_id))} "
+                   f"{summary.get('me_name') or ''}").rstrip()
+    lines = [f"=== Outage impacts on {market.upper()} {subject}, {day} HE{start_hr}-HE{end_hr} ==="]
+    if constraint_id is None:
+        lines.append(f"Contingency from constraint {used_constraint}, the element's most recently used constraint."
+                     if used_constraint is not None else "The element has no constraint, so there is no contingency.")
+    if outage_key and not impacts.empty:
+        impacts = impacts[impacts["outage_keys"].map(lambda keys: outage_key in keys)]
     if impacts.empty:
         return "\n".join(lines + ["No outage impacts (see warnings)."] + _warnings_section(warnings))
     limit = summary.get("limit") or {}
@@ -1310,4 +1393,5 @@ def outage_briefing(market: str, date: str = "") -> str:
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_preload_notes, name="preload-notes", daemon=True).start()
     server.run("stdio")

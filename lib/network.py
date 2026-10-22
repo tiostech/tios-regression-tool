@@ -255,6 +255,30 @@ def constraint_definition(engine, market: str, constraint_id: int, warn=_no_warn
             "direction": binding_direction(me_name)}
 
 
+def monitored_element_definition(engine, market: str, me_id: int, warn=_no_warn) -> dict:
+    """Like constraint_definition, for a monitored element: the contingency comes from the
+    element's most recently used constraint that has one ("constraint_id"; None, with no
+    contingency, when the element has no constraint)."""
+    with engine.connect() as conn:
+        me_name = conn.execute(text(f"""
+            SELECT monitored_element_name FROM {market}_official_monitored_elements WHERE id = :m
+        """), {"m": me_id}).scalar()
+        row = conn.execute(text(f"""
+            SELECT id, contingency_element_name, COALESCE(rt_descriptive_name, da_descriptive_name)
+            FROM {market}_official_constraints WHERE official_monitored_element_id = :m
+            ORDER BY contingency_element_name IS NULL, last_used IS NULL, last_used DESC, id DESC LIMIT 1
+        """), {"m": me_id}).fetchone()
+    if me_name is None:
+        warn(f"Monitored element {me_id} was not found.")
+    constraint_id, contingency, name = row if row else (None, None, None)
+    if contingency is None and market == "miso" and name and "_" in name:
+        contingency = name.split("_", 1)[0]
+    if constraint_id is None:
+        warn(f"Monitored element {me_id} has no constraint, so impacts are pre-contingency.")
+    return {"me_id": me_id, "me_name": me_name, "contingency": contingency, "name": name,
+            "constraint_id": constraint_id, "direction": binding_direction(me_name)}
+
+
 ME_DIRECTION = re.compile(r"<([+-])1>\s*$")
 
 

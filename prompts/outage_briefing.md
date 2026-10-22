@@ -17,7 +17,9 @@ comment is not sent to the AI.
 Write the Transmission Outage Analysis report below for every {{MARKET}} transmission outage with a planned start on {{date}}.
 
 1. Call `list_upcoming_outages` with market `{{market}}` and date `{{date}}`.
-2. For each outage with note matches, annotations, or a flag, call `get_outage_documentation` with market `{{market}}` and its equipment ID. Do not call it for outages with no history.
+2. For each outage with note matches, group note matches, annotations, or a flag, call `get_outage_documentation` with market `{{market}}`. Do not call it for outages with no history.
+   - If the outage has group note matches, call it with `id_type` `group`, once for each of its group IDs. Desk notes usually name an outage by group, and a group search also finds the notes that name its equipment.
+   - Otherwise call it with its equipment ID.
    - If the result says notes were omitted and the older history matters for the RECENCY rule, call it again with `max_notes_per_element` set to 0.
    - If the result ends with WARNINGS, some data did not load. Say so in that outage's report.
 3. Write one report per documented outage, using the Output_Format below. The "current market" is {{MARKET}}. Put the outages in order: the outage with the strongest CONSIDER FORECASTING case first.

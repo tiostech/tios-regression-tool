@@ -53,13 +53,13 @@
     }
   },
   "tools": [
-    {"name": "list_upcoming_outages", "description": "Transmission outages planned to start on a day."},
+    {"name": "list_upcoming_outages", "description": "Transmission outages starting, ending, or in effect on a day, with history counts."},
     {"name": "get_outage_documentation", "description": "Desk notes and shadow price history for one outage."},
     {"name": "list_binding_constraints", "description": "Constraints that bound on a day, largest shadow price total first."},
     {"name": "get_constraint_drivers", "description": "Data for explaining why one constraint bound on a day."},
     {"name": "get_market_conditions", "description": "Hourly energy prices, RTEP, and stress index for a day."},
     {"name": "get_autoflow", "description": "Hourly flow that zonal wind, solar, and load put on a constraint."},
-    {"name": "get_outage_impacts", "description": "How much each outage in effect loads one constraint."},
+    {"name": "get_outage_impacts", "description": "How much each outage loads one constraint or monitored element, or one element/outage pair."},
     {"name": "get_shadow_forecasts", "description": "The desk's RT shadow price forecasts for a day, next to actuals."},
     {"name": "get_forecast_accuracy", "description": "How well RT shadow price forecasts did over a date range."},
     {"name": "get_forecast_model", "description": "The model group, features, and weights behind a constraint's forecast."},
