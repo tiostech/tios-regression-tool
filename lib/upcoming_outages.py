@@ -179,7 +179,7 @@ def add_group_ids(engine, market: str, outages: list[dict], warn=_no_warn) -> No
             res = conn.execute(text(f"""
                 SELECT DISTINCT outage_equipment_id, outage_equipment_group_id
                 FROM {market}_outage_equipment_group_members
-                WHERE outage_equipment_id IN ({placeholders})
+                WHERE outage_equipment_id IN ({placeholders}) AND (removed = 0 OR removed IS NULL)
                 ORDER BY outage_equipment_group_id
             """), {f"e{i}": eq for i, eq in enumerate(ids)}).fetchall()
         for eq_id, group_id in res:

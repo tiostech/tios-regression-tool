@@ -411,7 +411,8 @@ def fetch_monelem_meta_descriptions(engine, current_mkt: str, me_ids) -> dict[st
 
 
 def load_market_notes(engine, current_market: str) -> pd.DataFrame:
-    """Loads all notes and element names for the market. Slow (100k+ rows): callers should cache it."""
+    """Loads all notes (not deleted ones, like EnergyCore) and element names for the market. Slow (100k+ rows):
+    callers should cache it."""
     query = f"""
         SELECT
             qn.official_monitored_element_id,
@@ -422,6 +423,7 @@ def load_market_notes(engine, current_market: str) -> pd.DataFrame:
         FROM {current_market}_monelem_quick_notes qn
         LEFT JOIN {current_market}_official_monitored_elements ome
             ON qn.official_monitored_element_id = ome.id
+        WHERE qn.deleted = 0 OR qn.deleted IS NULL
     """
     with engine.connect() as conn:
         df = pd.read_sql(text(query), conn)
@@ -648,7 +650,7 @@ def build_search_fields(engine, search_type: str, raw_input_id: str, current_mar
                     eq_query = text(f"""
                         SELECT outage_equipment_id
                         FROM {outage_market}_outage_equipment_group_members
-                        WHERE outage_equipment_group_id IN ({placeholders})
+                        WHERE outage_equipment_group_id IN ({placeholders}) AND (removed = 0 OR removed IS NULL)
                     """)
                     params = {f"g{i}": gid for i, gid in enumerate(all_group_ids)}
                     eq_res = conn.execute(eq_query, params).fetchall()
@@ -829,7 +831,7 @@ def group_search_fields(engine, market: str, group_ids, warn=_no_warn) -> dict[s
             placeholders = ", ".join(f":g{i}" for i in range(len(every)))
             for gid, eq in conn.execute(text(f"""
                 SELECT outage_equipment_group_id, outage_equipment_id FROM {market}_outage_equipment_group_members
-                WHERE outage_equipment_group_id IN ({placeholders})
+                WHERE outage_equipment_group_id IN ({placeholders}) AND (removed = 0 OR removed IS NULL)
             """), {f"g{i}": g for i, g in enumerate(every)}).fetchall():
                 if eq is not None:
                     members.setdefault(str(gid), []).append(str(eq))
