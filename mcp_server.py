@@ -25,12 +25,14 @@ from sqlalchemy.exc import DBAPIError
 from lib import autoflow
 from lib import constraint_drivers as drivers
 from lib import db
+from lib import factors
 from lib import forecast_models
 from lib import links
 from lib import market_conditions
 from lib import monitored_elements
 from lib import network
 from lib import outage_impacts
+from lib import outage_groups
 from lib import outage_search as osearch
 from lib import shadow_forecasts
 from lib import upcoming_outages
@@ -71,7 +73,12 @@ server = MCPServer(
         "Constraint, monitored element, and outage names in the output are often markdown links to their "
         "EnergyCore pages; keep those links when you mention them in your answer. get_monitored_element gives an "
         "element's description and the elements it is linked to, often the same line in another market under a "
-        "different name; check it before saying a constraint is not shared with another market."
+        "different name; check it before saying a constraint is not shared with another market. "
+        "get_outage_group gives an outage's groups and every group member; get_outage_quicklinks gives the "
+        "monitored elements the desk quicklinked to an outage or group (in any market), and "
+        "get_monitored_element_notes gives all desk notes on elements over a date range. "
+        "get_constraint_factors gives a constraint's promoted shift factors: the most positive and most "
+        "negative pnodes."
     ),
 )
 
@@ -1363,6 +1370,305 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
         lines.append(f"({total_notes - len(notes)} older notes omitted; raise max_notes to see them.)")
 
     return "\n".join(lines + _warnings_section(warnings))
+
+
+
+def _equipment_label(market: str, equipment_id: str, names: dict) -> str:
+    name = names.get(str(equipment_id), "")
+    return links.md(f"{equipment_id} {name}".strip(), links.outage(market, equipment_id))
+
+
+def _group_label(market: str, group_id: str) -> str:
+    return links.md(f"GID {group_id}", links.outage_group(market, group_id))
+
+
+def _resolve_groups(eng, market: str, outage_id: str, id_type: str) -> tuple[str, list[str]]:
+    """(cleaned ID, the groups it starts from): the equipment's groups, or the group itself."""
+    cleaned = osearch.clean_id(outage_id)
+    if not cleaned:
+        raise ValueError(f"'{outage_id}' is not an equipment or group ID.")
+    if id_type == "equipment":
+        return cleaned, outage_groups.groups_for_equipment(eng, market, cleaned)
+    return cleaned, [cleaned]
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_outage_group(market: str, outage_id: str, id_type: str = "equipment", include_removed: bool = False) -> str:
+    """An outage's equipment groups and every member of them, for any equipment or group ID
+    (not only outages in effect on some day).
+
+    For an equipment ID: the groups it belongs to. For a group ID: that group. Either way each
+    group's associated groups (which the outage search also follows) and the full member list,
+    with names, are listed. MISO desk notes name outages by group ("GID 2972"); PJM has few groups.
+
+    Args:
+        market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
+        outage_id: One outage equipment ID or group ID.
+        id_type: equipment or group.
+        include_removed: Also list members marked removed (EnergyCore ignores them).
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("id_type", id_type, ["equipment", "group"])
+    eng = engine()
+    warnings = []
+    cleaned, start_groups = _resolve_groups(eng, market, outage_id, id_type)
+
+    lines = [f"Market: {market.upper()}"]
+    if id_type == "equipment":
+        names = outage_groups.equipment_names(eng, market, [cleaned], warn=warnings.append)
+        lines.append(f"Outage equipment: {_equipment_label(market, cleaned, names)}")
+        if not start_groups:
+            return "\n".join(lines + ["", "This equipment is not a member of any outage group."]
+                             + _warnings_section(warnings))
+        lines.append("Member of: " + ", ".join(_group_label(market, g) for g in start_groups))
+
+    assoc = outage_groups.associations(eng, market, start_groups)
+    forward = assoc[assoc["group_id"].isin(start_groups)]
+    backward = assoc[assoc["associated_group_id"].isin(start_groups) & ~assoc["group_id"].isin(start_groups)]
+    all_groups = list(dict.fromkeys(start_groups + forward["associated_group_id"].tolist()
+                                    + backward["group_id"].tolist()))
+
+    info = outage_groups.groups(eng, market, all_groups)
+    if info.empty:
+        return "\n".join(lines + ["", f"No {market.upper()} outage group {cleaned}."] + _warnings_section(warnings))
+    mem = outage_groups.members(eng, market, all_groups, include_removed=include_removed)
+    names = outage_groups.equipment_names(eng, market, mem["equipment_id"].tolist()
+                                          + info["basis_outage_id"].dropna().astype(str).tolist(), warn=warnings.append)
+
+    for g in all_groups:
+        row = info[info["group_id"] == g]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        how = ("starting group" if g in start_groups
+               else "associated (followed by the outage search)" if g in forward["associated_group_id"].values
+               else "has this group as an associated group (not followed by the outage search)")
+        lines += ["", f"=== {_group_label(market, g)} {r['equipment_name'] or ''} ({how}) ==="]
+        details = [f"{k} {r[c]}" for k, c in (("type", "likely_equipment_type"), ("from", "likely_from_station"),
+                                              ("to", "likely_to_station"), ("kV", "kv"))
+                   if r[c] is not None and not pd.isna(r[c]) and str(r[c]).strip()]
+        if r["basis_outage_id"] is not None and not pd.isna(r["basis_outage_id"]):
+            details.append("basis outage " + _equipment_label(market, str(int(r["basis_outage_id"])), names))
+        if r["manual"]:
+            details.append("manual")
+        if details:
+            lines.append("; ".join(details))
+        gm = mem[mem["group_id"] == g].copy()
+        lines.append(f"Members: {len(gm)}")
+        if not gm.empty:
+            gm["equipment"] = [_equipment_label(market, e, names) for e in gm["equipment_id"]]
+            cols = ["equipment_id", "equipment", "score", "manual"] + (["removed"] if include_removed else [])
+            lines += _tsv(gm, cols, decimals=2)
+
+    every = sorted(set(mem["equipment_id"]), key=lambda x: int(x) if x.isdigit() else 0)
+    lines += ["", f"All member equipment IDs ({len(every)}): " + ", ".join(every)]
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_outage_quicklinks(market: str, outage_id: str, id_type: str = "equipment", include_groups: bool = True,
+                          max_links: int = 150) -> str:
+    """Monitored elements the desk quicklinked to an outage: its whole quicklink history, for
+    every outage request, from elements in any market (a MISO outage is often quicklinked from
+    SPP or PJM elements).
+
+    Args:
+        market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
+        outage_id: One outage equipment ID or group ID.
+        id_type: equipment or group.
+        include_groups: For an equipment ID, also the links to its groups and their associated
+            groups, and for a group ID, also the links to its associated groups and to every
+            member's equipment. Links are often made to the group rather than the equipment.
+        max_links: Most individual quicklinks to list (newest first). 0 lists all of them. The
+            per-element summary always covers every link.
+
+    Returns one row per quicklink and a summary per monitored element. Follow up with
+    get_monitored_element_notes for the elements' note history.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("id_type", id_type, ["equipment", "group"])
+    eng = engine()
+    warnings = []
+    cleaned, start_groups = _resolve_groups(eng, market, outage_id, id_type)
+
+    equipment_ids, group_ids = ([cleaned], []) if id_type == "equipment" else ([], [cleaned])
+    if include_groups:
+        assoc = outage_groups.associations(eng, market, start_groups)
+        group_ids = list(dict.fromkeys(start_groups + assoc[assoc["group_id"].isin(start_groups)]["associated_group_id"].tolist()))
+        if id_type == "group":
+            equipment_ids = outage_groups.members(eng, market, group_ids)["equipment_id"].unique().tolist()
+
+    links_df = outage_groups.quicklinks(eng, market, equipment_ids, group_ids, warn=warnings.append)
+    names = outage_groups.equipment_names(eng, market, equipment_ids or [cleaned], warn=warnings.append)
+
+    target = (_equipment_label(market, cleaned, names) if id_type == "equipment" else _group_label(market, cleaned))
+    lines = [f"Market: {market.upper()}", f"Outage: {target}"]
+    if include_groups:
+        lines.append(f"Searched: {len(equipment_ids)} equipment ID(s)"
+                     + (f", groups {', '.join(_group_label(market, g) for g in group_ids)}" if group_ids else ", no groups"))
+    if links_df.empty:
+        return "\n".join(lines + ["", "No quicklinks."] + _warnings_section(warnings))
+
+    me_names = {}
+    for mkt, ids in links_df.groupby("me_market")["me_id"]:
+        me_names.update({(mkt, k): v for k, v in monitored_elements.names(eng, mkt, ids).items()})
+    links_df["element"] = [links.md(f"{m}:{i} {me_names.get((m, int(i)), '')}".strip(), links.monitored_element(m, i))
+                           for m, i in zip(links_df["me_market"], links_df["me_id"])]
+    links_df["me"] = [f"{m}:{int(i)}" for m, i in zip(links_df["me_market"], links_df["me_id"])]
+    links_df["outage"] = [o if k == "equipment" else f"GID {o}" for k, o in zip(links_df["outage_kind"], links_df["outage_id"])]
+    links_df["created"] = links_df["created_at"].map(_fmt_dt)
+
+    summary = (links_df.groupby(["me_market", "me_id", "element"], sort=False)
+               .agg(links=("outage", "size"), first_linked=("created_at", "min"), last_linked=("created_at", "max"))
+               .reset_index().sort_values(["links", "last_linked"], ascending=False))
+    summary["first_linked"] = summary["first_linked"].map(_fmt_dt)
+    summary["last_linked"] = summary["last_linked"].map(_fmt_dt)
+    lines += ["", f"--- Monitored elements ({len(summary)}) ---"] + _tsv(summary, ["element", "links", "first_linked", "last_linked"])
+    shown = links_df.head(max_links) if max_links else links_df
+    lines += ["", f"--- Quicklinks ({len(links_df)}, newest first) ---"] + _tsv(shown, ["me", "outage", "request_id", "created"])
+    if len(shown) < len(links_df):
+        lines.append(f"({len(links_df) - len(shown)} older quicklinks omitted; raise max_links or set it to 0 to see them.)")
+    for mkt, ids in summary.groupby("me_market", sort=False)["me_id"]:
+        lines.append(f"{mkt.upper()} monitored element IDs: " + ", ".join(str(int(i)) for i in ids))
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_monitored_element_notes(market: str, me_ids: list[int], lookback: str = "5 Years", start_date: str | None = None,
+                                end_date: str | None = None, context: str = "All", max_notes: int = 500) -> str:
+    """Every desk quick note on one or more monitored elements over a date range, newest first,
+    without deleted notes. Unlike get_outage_documentation it does not search note text, so it
+    finds notes that never name the outage.
+
+    Args:
+        market: Market of the monitored elements: miso, spp, pjm, ercot, or caiso.
+        me_ids: Monitored element IDs, for example the ones get_outage_quicklinks lists.
+        lookback: 1 Month, 6 Months, 1 Year, 3 Years, 5 Years, or All Time. Ignored when start_date is given.
+        start_date: First day, YYYY-MM-DD.
+        end_date: Last day, YYYY-MM-DD. Default: today.
+        context: All, rt_shadow, rt_shadow_forecast, or da_shadow.
+        max_notes: Most notes to show in all (newest first). 0 shows all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("lookback", lookback, osearch.LOOKBACK_OPTIONS)
+    _check_choice("context", context, osearch.CONTEXT_OPTIONS)
+    if not me_ids:
+        raise ValueError("Give at least one monitored element ID.")
+    eng = engine()
+    if start_date:
+        start = datetime.date.fromisoformat(start_date).isoformat()
+    else:
+        s = osearch.lookback_start_date(lookback, pd.Timestamp.now())
+        start = s.strftime("%Y-%m-%d") if s is not None else None
+    end = datetime.date.fromisoformat(end_date).isoformat() if end_date else None
+
+    notes = outage_groups.element_notes(eng, market, me_ids, start, end, context)
+    names = monitored_elements.names(eng, market, me_ids)
+    lines = [f"Market: {market.upper()}", f"Dates: {start or 'all time'} to {end or 'today'}; context {context}"]
+    counts = notes.groupby("me_id").size() if not notes.empty else pd.Series(dtype=int)
+    lines += ["", "--- Elements ---"]
+    for i in sorted({int(x) for x in me_ids}):
+        label = links.md(f"{i} {names.get(i, '')}".strip(), links.monitored_element(market, i))
+        lines.append(f"{label}: {int(counts.get(i, 0))} notes")
+    total = len(notes)
+    if max_notes:
+        notes = notes.head(max_notes)
+    lines += ["", f"--- Notes ({total}, newest first) ---"]
+    if notes.empty:
+        lines.append("No notes.")
+    for n in notes.itertuples():
+        body = osearch.clean_body_text_for_raw(n.body)
+        lines.append(f"{n.dt:%Y-%m-%d} ME {n.me_id} {n.context}: {body}")
+    if len(notes) < total:
+        lines.append(f"({total - len(notes)} older notes omitted; raise max_notes or set it to 0 to see them.)")
+    return "\n".join(lines)
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_constraint_factors(market: str, constraint_id: int, top_n: int = 100, node_types: list[str] | None = None,
+                           zones: list[str] | None = None, collapse_ties: bool = False) -> str:
+    """A constraint's promoted shift factors: the ones EnergyCore uses (in the shadow-based
+    nodal congestion forecasts, congestion = factor x shadow price). Lists the most positive
+    and most negative pnodes and which factor source won.
+
+    EnergyCore picks one source per constraint (in PJM: trader-frozen, dependency-recent,
+    rt-matrix-recent, dependency, rt-matrix, trader-csv, trader-copy, auto-copy, da-matrix,
+    tlr). auto-copy and trader-copy borrow another constraint's factors; the copied-from
+    constraint and its original source are shown.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        constraint_id: Official constraint ID.
+        top_n: How many of the most positive and of the most negative factors to list.
+        node_types: Only these pnode types, for example ["aggregate", "interface"] or ["GEN"].
+        zones: Only pnodes in these zones (PJM, SPP; MISO pnodes have no zone).
+        collapse_ties: One row per distinct factor value with a count and example pnodes.
+            Equivalent buses at a station share a factor, so a plain list can be one station
+            over and over.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    if top_n < 1:
+        raise ValueError("top_n must be at least 1.")
+    eng = engine()
+    name, me_id, me_name = factors.constraint_name(eng, market, constraint_id)
+    today = datetime.date.today()
+    title = links.md(f"{constraint_id} {name}".strip(), links.constraint(market, constraint_id, today - datetime.timedelta(days=30), today))
+    lines = [f"=== {market.upper()} constraint {title} ==="]
+    if me_id is not None:
+        lines.append("Monitored element: " + links.md(f"{me_id} {me_name}".strip(), links.monitored_element(market, me_id)))
+
+    m = factors.master(eng, market, constraint_id)
+    if m is None:
+        return "\n".join(lines + ["", "This constraint has no promoted factors."])
+    source = m["source_type"] or "?"
+    if m["aggregate_type"]:
+        source += f" (original source {m['aggregate_type']})"
+    lines.append(f"Factor source: {source}")
+    if m["source_official_constraint_id"] and m["source_official_constraint_id"] != constraint_id:
+        src_name, _, _ = factors.constraint_name(eng, market, m["source_official_constraint_id"])
+        src = m["source_official_constraint_id"]
+        lines.append("Copied from constraint: " + links.md(f"{src} {src_name}".strip(),
+                                                          links.constraint(market, src, today - datetime.timedelta(days=30), today)))
+    stamps = [f"{label} {_fmt_dt(m[c])}" for label, c in (("reading", "reading_time"), ("solve from", "solve_start_dt"),
+                                                          ("to", "solve_stop_dt"), ("updated", "updated_at"),
+                                                          ("expires", "expires_at"), ("frozen until", "frozen_until"))
+              if m[c] is not None and not pd.isna(m[c])]
+    if stamps:
+        lines.append("Times: " + "; ".join(stamps))
+    if (str(m["source_type"]).endswith("-recent") and m["expires_at"] is not None and not pd.isna(m["expires_at"])
+            and m["expires_at"] <= datetime.datetime.now()):
+        lines.append(f"Note: past expires_at, so EnergyCore's next aggregation relabels the source "
+                     f"{str(m['source_type']).removesuffix('-recent')}; the factors stay the same.")
+    flags = [f for f, c in (("temporary", "temporary"), ("manual", "manual")) if m[c]]
+    if flags:
+        lines.append("Flags: " + ", ".join(flags))
+
+    df = factors.details(eng, market, constraint_id)
+    total = len(df)
+    df = factors.filter_details(df, node_types, zones)
+    lines.append(f"Pnodes with factors: {total}" + (f" ({len(df)} after the node type and zone filters)" if len(df) != total else "")
+                 + f"; positive {int((df['factor'] > 0).sum())}, negative {int((df['factor'] < 0).sum())}, "
+                   f"zero {int((df['factor'] == 0).sum())}")
+    if df.empty:
+        return "\n".join(lines)
+    pos, neg = factors.extremes(df, top_n, collapse_ties=collapse_ties)
+    cols = ["factor", "pnodes", "examples", "node_types", "zones"] if collapse_ties else ["pnode_id", "pnode", "node_type", "zone", "factor"]
+    if not df["zone"].astype(bool).any():
+        cols.remove("zones" if collapse_ties else "zone")
+    unit = "factor values" if collapse_ties else "pnodes"
+
+    def fmt(side: pd.DataFrame) -> pd.DataFrame:
+        side = side.copy()
+        side["factor"] = side["factor"].map(lambda f: f"{f:.5f}")
+        return side
+
+    lines += ["", f"--- Most positive ({len(pos)} {unit}) ---"] + (_tsv(fmt(pos), cols) if not pos.empty else ["None."])
+    lines += ["", f"--- Most negative ({len(neg)} {unit}) ---"] + (_tsv(fmt(neg), cols) if not neg.empty else ["None."])
+    return "\n".join(lines)
 
 
 @server.prompt()

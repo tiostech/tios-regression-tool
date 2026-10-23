@@ -152,6 +152,10 @@ counts against your assistant subscription, not a separate API bill.
 | `get_market_conditions` | Hourly DA/RT system energy prices, our RTEP and DAEP forecasts as of the day-ahead deadline, and the lion stress index (reserve margin, net load). Also included in `get_constraint_drivers`. |
 | `get_outage_impacts` | How much each transmission outage in effect on a day loads one constraint, from EnergyCore's network model (including the contingency, and SPP/PJM outages for MISO). Works for future days, using planned outages. |
 | `get_autoflow` | Hourly autoflow on a constraint over a date range — the flow zonal wind, solar, and load put on it — computed like EnergyCore's Autoflow analysis, from pseudo actuals (EnergyCore's S3 cache; needs AWS credentials) or day-ahead forecasts. |
+| `get_outage_group` | For any equipment or group ID: the groups it belongs to, their associated groups, and every member equipment ID with its name. |
+| `get_outage_quicklinks` | Every monitored element the desk quicklinked to an outage (and its groups), from any market, across all of its outage requests. |
+| `get_monitored_element_notes` | All desk notes on one or more monitored elements over a date range, without searching note text. |
+| `get_constraint_factors` | A constraint's promoted shift factors (the ones EnergyCore's shadow-based congestion forecasts use): the 100 most positive and 100 most negative pnodes, the winning factor source, and what it was copied from. |
 | `binding_drivers` (prompt) | Instructions for explaining why the day's highest constraints bound. They live in `prompts/binding_drivers.md`. |
 
 ### Setup (once)
