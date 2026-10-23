@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "energycore-outages",
   "display_name": "EnergyCore Outages",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Read-only transmission outage search, binding constraint drivers, and market conditions from tioscore_production.",
   "long_description": "The trading desk's outage and shadow price search for Claude Desktop. Runs locally and reads tioscore_production through your SSH tunnel (default 127.0.0.1:3309), and the S3 caches through your normal AWS credentials (~/.aws). Start the tunnel before using the tools.",
   "author": {
