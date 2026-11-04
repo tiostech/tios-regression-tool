@@ -14,6 +14,8 @@ dependencies = [
     "pymysql>=1.2",
     "cryptography",
     "pyyaml>=6.0",
+    # lib/fid.py reads FID results from S3 with the default AWS credential chain.
+    "boto3>=1.35",
     # lib/db.py imports streamlit for the app's caching decorators.
     "streamlit>=1.65",
 ]

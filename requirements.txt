@@ -12,3 +12,4 @@ pyyaml
 statsmodels
 pymysql
 pyarrow
+boto3
