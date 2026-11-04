@@ -36,6 +36,7 @@ with data for fewer than 90% of the hours, as in tios-core. Both are reported th
 ``warn``.
 """
 
+import concurrent.futures
 import datetime
 import os
 import threading
@@ -315,16 +316,41 @@ def _read_cache_month(table: str, month: datetime.date) -> pd.DataFrame | None:
     return df
 
 
-def _pseudo_actual_values(table: str, zone_col: str, mw_col: str, zones, start_utc, end_utc,
-                          warn=_no_warn) -> pd.DataFrame:
-    """Pseudo actuals from the S3 cache as [time_utc, zone, mw]."""
+def _months(start_utc, end_utc) -> list[datetime.date]:
     months, m = [], datetime.date(start_utc.year, start_utc.month, 1)
     while m <= end_utc.date():
         months.append(m)
         m = (m + datetime.timedelta(days=32)).replace(day=1)
+    return months
 
+
+# An autoflow over a week reads one S3 file per (zone table, month), 20-30 of them; one after
+# another that took 7-8 seconds. They are fetched in parallel into the cache first.
+S3_PREFETCH_WORKERS = 8
+
+
+def _prefetch_cache_months(tables, start_utc, end_utc) -> None:
+    """Loads these tables' months into the cache in parallel. Failures are left for the
+    sequential read to retry and report, so the results and warnings are unchanged."""
+    wanted = [(t, mo) for t in dict.fromkeys(tables) for mo in _months(start_utc, end_utc)]
+    if len(wanted) < 2:
+        return
+
+    def load(item):
+        try:
+            _read_cache_month(*item)
+        except Exception:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=S3_PREFETCH_WORKERS) as pool:
+        list(pool.map(load, wanted))
+
+
+def _pseudo_actual_values(table: str, zone_col: str, mw_col: str, zones, start_utc, end_utc,
+                          warn=_no_warn) -> pd.DataFrame:
+    """Pseudo actuals from the S3 cache as [time_utc, zone, mw]."""
     frames = []
-    for month in months:
+    for month in _months(start_utc, end_utc):
         try:
             df = _read_cache_month(table, month)
         except Exception as e:  # credentials, network, permissions
@@ -382,6 +408,12 @@ def autoflow(engine, market: str, constraint_id: int, start_date: datetime.date,
     day_rows = pd.DataFrame({"dt": [start_date, end_date + datetime.timedelta(days=1)], "hr": [1, 1]})
     start_utc, end_utc = _local_he_to_utc(day_rows, market_tz)
     end_utc = end_utc - datetime.timedelta(hours=1)
+
+    if source != "forecast":
+        _prefetch_cache_months([zonal_table(iso, v, ct)[0] + "_snapshots"
+                                for ct, iso, v in coeffs[["coefficient_type", "iso", "vendor"]].drop_duplicates()
+                                .itertuples(index=False)
+                                if _table_exists(engine, _gate_table(iso, v, ct))], start_utc, end_utc)
 
     frames, skipped = [], []
     for (ctype, iso, row_vendor), group in coeffs.groupby(["coefficient_type", "iso", "vendor"]):
