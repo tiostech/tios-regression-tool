@@ -13,6 +13,7 @@ import datetime
 import functools
 import logging
 import os
+import re
 import threading
 import time
 import zoneinfo
@@ -253,7 +254,8 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
     outage by group (GID), so for an outage with group_note_matches, call
     get_outage_documentation with id_type="group" and each of its group_ids. Outages with
     note_matches, group_note_matches, annotations, and flag all empty have no history, so
-    get_outage_documentation would return nothing useful for them.
+    get_outage_documentation would return nothing useful for them; their names are not
+    linked, to keep the listing short.
     """
     _check_choice("market", market, osearch.MARKETS)
     _check_choice("window", window, upcoming_outages.WINDOWS)
@@ -306,8 +308,14 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
     lines += ["", "\t".join(header)]
 
     for o in outages:
-        groups = [links.md(g, links.outage_group(market, g)) if market == "miso" else g for g in o["group_ids"]]
-        row = [o["outage_equipment_id"], links.md(o["name"], links.outage(market, o["outage_equipment_id"])),
+        # Links only where there is history to follow up on: a PJM day has ~300 outages, ~10%
+        # with history, and a link on every row pushed the listing past clients' output limits.
+        linked = (not check_history) or bool(o["note_matches"] or o["group_note_matches"] or o["annotations"]
+                                             or o["flag_type"])
+        groups = [links.md(g, links.outage_group(market, g)) if market == "miso" and linked else g
+                  for g in o["group_ids"]]
+        name = links.md(o["name"], links.outage(market, o["outage_equipment_id"])) if linked else o["name"]
+        row = [o["outage_equipment_id"], name,
                o["equipment_type"], "" if o["kv"] is None else str(o["kv"]),
                _fmt_dt(o["planned_start"]), _fmt_dt(o["planned_end"]), ", ".join(o["request_statuses"]),
                ", ".join(str(r) for r in o["request_ids"]), ", ".join(groups)]
@@ -1697,12 +1705,15 @@ def get_constraint_factors(market: str, constraint_id: int, top_n: int = 100, no
     return "\n".join(lines)
 
 
+MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
 @server.tool(annotations=READ_ONLY)
 @_readable_errors
 def list_flagged_outages(market: str, flags: list[str] | None = None, flag_source: str = "both",
                          start_date: str | None = None, end_date: str | None = None, include_ignored: bool = False,
                          equipment_types: list[str] | None = None, min_kv: float | None = None,
-                         max_outages: int = 200, max_note_chars: int = 400) -> str:
+                         max_outages: int = 50, max_note_chars: int = 200) -> str:
     """Every transmission outage the desk has flagged, over a date range: by default all
     red-flagged outages (alert and auto_alert) that are out today or later.
 
@@ -1725,7 +1736,8 @@ def list_flagged_outages(market: str, flags: list[str] | None = None, flag_sourc
         min_kv: Only outages at this voltage or higher.
         max_outages: Most outages to list: those starting in the range (soonest first), then those
             already out (most recent start first). 0 lists all of them.
-        max_note_chars: Longest flag note to show per outage; 0 shows the whole note.
+        max_note_chars: Longest flag note to show per outage (links in notes are shown as
+            their text); 0 shows the whole note.
 
     Returns one row per equipment ID with its flags, dates, requests, groups, and the latest
     flag note. Follow up with get_outage_documentation or get_outage_group.
@@ -1770,6 +1782,8 @@ def list_flagged_outages(market: str, flags: list[str] | None = None, flag_sourc
         latest = g.sort_values("note_time", ascending=False).iloc[0]
         noted = g[g["notes"].fillna("").str.strip() != ""].sort_values("note_time", ascending=False)
         note = osearch.clean_body_text_for_raw(noted.iloc[0]["notes"]) if not noted.empty else ""
+        # Notes are full of pasted EnergyCore links; their URLs were most of a long listing.
+        note = MD_LINK.sub(r"\1", note)
         if max_note_chars and len(note) > max_note_chars:
             note = note[:max_note_chars].rstrip() + " ..."
         who = noted.iloc[0]["user_id"] if not noted.empty else latest["user_id"]
@@ -1801,6 +1815,8 @@ def list_flagged_outages(market: str, flags: list[str] | None = None, flag_sourc
                                   for g in r["group_ids"]) for r in recs]
     for c in ("start", "end", "flag_updated"):
         out[c] = out[c].map(_fmt_dt)
+    # PJM records open-ended outages with a far-future end (2200-01-01).
+    out["end"] = out["end"].map(lambda e: "open-ended" if e[:4].isdigit() and int(e[:4]) >= 2100 else e)
     if out["flagged_in"].nunique() == 1 and out["flagged_in"].iloc[0] == market.upper():
         out = out.drop(columns="flagged_in")
 
@@ -1825,7 +1841,7 @@ def get_generator_outages(market: str, start_date: str | None = None, end_date: 
                           name: str | None = None, plant_ids: list[int] | None = None, unit_ids: list[int] | None = None,
                           outage_ids: list[int] | None = None, fuels: list[str] | None = None,
                           outage_types: list[str] | None = None, min_mw: float | None = None,
-                          include_cancelled: bool = False, history: bool = False, max_outages: int = 200) -> str:
+                          include_cancelled: bool = False, history: bool = False, max_outages: int = 100) -> str:
     """Generator outages and derates from IIR, current or historical: the outages active at any
     time in a date range, optionally for one plant, unit, owner, or fuel, with each outage's
     revision history on request.
@@ -1837,7 +1853,8 @@ def get_generator_outages(market: str, start_date: str | None = None, end_date: 
     Args:
         market: miso, spp, pjm, ercot, or caiso.
         start_date: First day, YYYY-MM-DD. Default today, unless name or an ID filter is given,
-            in which case there is no date limit.
+            in which case there is no date limit. Outages active on or after it are listed,
+            including future ones, unless end_date is also given.
         end_date: Last day, YYYY-MM-DD. Default start_date (outages in effect that day), unless
             name or an ID filter is given, in which case there is no limit.
         name: Text to find in the plant, unit, or owner name, for example "Comanche Peak".
@@ -1884,7 +1901,7 @@ def get_generator_outages(market: str, start_date: str | None = None, end_date: 
     shown["outage"] = [links.md(o, f"{links.BASE}/{market}/iir_outages?commit=1&outage_ids={o}") for o in shown["outage_id"]]
     shown["was"] = [f"{a or ''}..{b or ''}" if (a is not None and not pd.isna(a)) or (b is not None and not pd.isna(b)) else ""
                     for a, b in zip(shown["prv_ta_st"], shown["prv_ta_end"])]
-    shown["comments"] = shown["comments"].fillna("").map(lambda c: c[:200])
+    shown["comments"] = shown["comments"].fillna("").map(lambda c: c[:120])
     shown["updated"] = shown["updated_at"].map(_fmt_dt)
     cols = ["outage", "plant_name", "unit_name", "unit_id", "plant_id", "owner_name", "prim_fuel", "out_design",
             "cap_offlin", "ta_start", "ta_end", "was", "outage_typ", "outage_sta", "out_cause", "updated", "comments"]
@@ -1956,6 +1973,8 @@ def get_sced_shadow_prices(constraint_ids: list[int] | None = None, me_ids: list
         return links.md(f"{int(cid)} {cname or ''}".strip(), links.constraint("ercot", cid, start, end))
 
     summ = summ.copy()
+    for c in ("runs", "binding_runs", "binding_hours"):
+        summ[c] = summ[c].fillna(0).astype(int)
     summ["constraint"] = [label(c, n) for c, n in zip(summ["constraint_id"], summ["constraint_name"])]
     summ["element"] = [links.md(int(m), links.monitored_element("ercot", m)) if m is not None and not pd.isna(m) else ""
                        for m in summ["me_id"]]
@@ -2265,7 +2284,7 @@ def list_fid_runs(market: str, days: int = 2, include_adhoc: bool = True) -> str
 
 @server.tool(annotations=READ_ONLY)
 @_readable_errors
-def get_fid_changes(market: str, run_id: str | None = None, me_ids: list[int] | None = None, top_n: int = 15,
+def get_fid_changes(market: str, run_id: str | None = None, me_ids: list[int] | None = None, top_n: int = 10,
                     outages_per_element: int = 5, change_pct: float = 2.0) -> str:
     """What the latest FID run says: the biggest upcoming risks (constraints whose post-outage
     flow gets closest to or over the element's rating on the days ahead, and the outages driving

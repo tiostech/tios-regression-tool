@@ -1013,6 +1013,9 @@ def clipboard_text(current_market: str, search_fields: list[str], outage_names: 
 
     clipboard_parts.append("")
     clipboard_parts.append("=== MONITORED ELEMENT DESCRIPTIONS ===")
+    if not me_groups:
+        clipboard_parts.append("No monitored elements: no notes matched.")
+        return "\n".join(clipboard_parts)
     clipboard_parts.append("Monitored Element ID\tMonitored Element Name\tDescription")
     for g in me_groups:
         me_desc = meta_descriptions.get(g['me_id'], "")
