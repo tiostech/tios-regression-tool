@@ -43,6 +43,24 @@ def outage(market: str, equipment_id, active: bool = False) -> str | None:
     return f"{BASE}/{market.lower()}/{page}/search?{urlencode(query)}"
 
 
+def long_lodf(market: str, equipment_ids, request_ids, start: datetime.date, stop: datetime.date, filters: dict,
+              version: datetime.date | None = None, apply_regression_ignore_rules: bool = False) -> str:
+    """EnergyCore's Long-LODF page (outage_effects v3) with these settings, as the outage
+    search links to it."""
+    query = {k: ("true" if v else "false") if isinstance(v, bool) else ("" if v is None else f"{v:g}")
+             for k, v in filters.items()}
+    query.update({"market_urn": market.lower(), "outage_equipment_ids": ",".join(_id(e) for e in equipment_ids),
+                  "constraint_active_start_dt": start.isoformat(), "constraint_active_stop_dt": stop.isoformat(),
+                  "commit": 1, "compact_view": 1})
+    if request_ids:
+        query["outage_request_ids"] = ",".join(str(r) for r in request_ids)
+    if version:
+        query["version_dt"] = version.isoformat()
+    if apply_regression_ignore_rules:
+        query["apply_regression_ignore_rules"] = 1
+    return f"{BASE}/{market.lower()}/outage_effects/v3?{urlencode(query)}"
+
+
 def outage_group(market: str, group_id) -> str | None:
     return f"{BASE}/{market.lower()}/outage_groups/{_id(group_id)}/edit" if _valid(group_id) else None
 
