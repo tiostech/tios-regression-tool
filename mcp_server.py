@@ -28,6 +28,7 @@ from lib import db
 from lib import factors
 from lib import forecast_models
 from lib import links
+from lib import long_lodf
 from lib import market_conditions
 from lib import monitored_elements
 from lib import network
@@ -78,7 +79,9 @@ server = MCPServer(
         "monitored elements the desk quicklinked to an outage or group (in any market), and "
         "get_monitored_element_notes gives all desk notes on elements over a date range. "
         "get_constraint_factors gives a constraint's promoted shift factors: the most positive and most "
-        "negative pnodes."
+        "negative pnodes. get_long_lodf_search is EnergyCore's Long-LODF search for an outage: the monitored "
+        "elements it loads (LODFs) with their RT shadow totals while the outage was out, using the market's saved "
+        "preset by default."
     ),
 )
 
@@ -1669,6 +1672,182 @@ def get_constraint_factors(market: str, constraint_id: int, top_n: int = 100, no
     lines += ["", f"--- Most positive ({len(pos)} {unit}) ---"] + (_tsv(fmt(pos), cols) if not pos.empty else ["None."])
     lines += ["", f"--- Most negative ({len(neg)} {unit}) ---"] + (_tsv(fmt(neg), cols) if not neg.empty else ["None."])
     return "\n".join(lines)
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_long_lodf_search(market: str, outage_id: str, id_type: str = "equipment", outage_request_id: str | None = None,
+                         lookback_days: int | None = None, lookback_months: int | None = None,
+                         threshold_min_lodf: float | None = None,
+                         threshold_min_post_outage_flow_pct_of_limit: float | None = None,
+                         threshold_min_flow_delta_pct_of_limit: float | None = None,
+                         threshold_min_flow_max_delta_pct_of_limit: float | None = None,
+                         threshold_min_total_rt_shadows: float | None = None,
+                         use_total_rt_shadows: bool | None = None, apply_regression_ignore_rules: bool = False,
+                         use_market_defaults: bool = True, version_date: str | None = None, max_rows: int = 100) -> str:
+    """EnergyCore's "Long-LODF" search for an outage (the link on the outage search pages): the
+    monitored elements the outage loads, from the PowerWorld LODFs, with each element's active
+    constraints and their total RT shadow prices over the last 5 years while the outage (or its
+    groups) was out. Same query, formulas, and filters as the page.
+
+    Elements: those with a constraint active (DA/RT shadow or RT forecast) in the lookback
+    window. Delta = flow change as % of the monitored limit (signed: negative when the flow
+    drops); max delta = outage-branch limit / monitored limit x LODF. Sorted by delta, then LODF.
+
+    Defaults come from the market's saved preset (lodf_default_filters) and lookback
+    (lodf_link_lookback_days), exactly what the page uses. PJM's preset: 540 days, max delta >= 7,
+    RT shadows >= 100, regression ignore rules off. MISO's: 6 months, max delta >= 10, RT total
+    >= 0. Any threshold you pass replaces the preset's; pass 0 to turn a threshold off, or set
+    use_market_defaults=false to start from no thresholds.
+
+    Args:
+        market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
+        outage_id: One outage equipment ID, or a group ID (searches every member of the group and
+            of its associated groups).
+        id_type: equipment or group.
+        outage_request_id: Only this outage request (the page's link passes the row's request).
+            Default: every request for the equipment (LODF values don't depend on the request).
+        lookback_days: Constraint window in days back from today. Default: the market's preset.
+        lookback_months: Same, in months (used when lookback_days is not given).
+        threshold_min_lodf: |LODF| at least this (LODFs are in percent).
+        threshold_min_post_outage_flow_pct_of_limit: Post-outage flow at least this % of the limit.
+        threshold_min_flow_delta_pct_of_limit: |Delta| at least this %.
+        threshold_min_flow_max_delta_pct_of_limit: |Max delta| at least this %.
+        threshold_min_total_rt_shadows: Total RT shadows at least this ($). Needs use_total_rt_shadows.
+        use_total_rt_shadows: Compute the RT shadow totals and apply their threshold (slower).
+        apply_regression_ignore_rules: Drop outage records the regression ignore rules exclude
+            (cancelled/denied requests and the like). Off on the outage pages' links.
+        use_market_defaults: Start from the market's saved filter preset (true) or from no thresholds
+            and no RT totals (false). The lookback always defaults to the market's.
+        version_date: Network model date (YYYY-MM-DD). Default: the model EnergyCore marks default.
+        max_rows: Most rows to list. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("id_type", id_type, ["equipment", "group"])
+    if lookback_days is not None and lookback_days < 1 or lookback_months is not None and lookback_months < 1:
+        raise ValueError("lookback_days and lookback_months must be at least 1.")
+    eng = engine()
+    warnings = []
+    cleaned = osearch.clean_id(outage_id)
+    if not cleaned or not cleaned.isdigit():
+        raise ValueError(f"'{outage_id}' is not an equipment or group ID.")
+
+    if id_type == "group":
+        assoc = outage_groups.associations(eng, market, [cleaned])
+        group_ids = list(dict.fromkeys([cleaned] + assoc[assoc["group_id"] == cleaned]["associated_group_id"].tolist()))
+        equipment_ids = sorted({int(e) for e in outage_groups.members(eng, market, group_ids)["equipment_id"]})
+        if not equipment_ids:
+            return f"Market: {market.upper()}\nOutage group {cleaned} has no (non-removed) members."
+        target = _group_label(market, cleaned) + f" ({len(equipment_ids)} member equipment IDs"
+        target += (", with associated " + ", ".join(_group_label(market, g) for g in group_ids[1:]) + ")") if len(group_ids) > 1 else ")"
+    else:
+        equipment_ids = [int(cleaned)]
+        names = outage_groups.equipment_names(eng, market, [cleaned], warn=warnings.append)
+        target = _equipment_label(market, cleaned, names)
+
+    filters = long_lodf.default_filters(eng, market) if use_market_defaults else {k: None for k in long_lodf.FILTER_KEYS}
+    if not use_market_defaults:
+        filters["use_total_rt_shadows"] = False
+    for k, v in (("threshold_min_lodf", threshold_min_lodf),
+                 ("threshold_min_post_outage_flow_pct_of_limit", threshold_min_post_outage_flow_pct_of_limit),
+                 ("threshold_min_flow_delta_pct_of_limit", threshold_min_flow_delta_pct_of_limit),
+                 ("threshold_min_flow_max_delta_pct_of_limit", threshold_min_flow_max_delta_pct_of_limit),
+                 ("threshold_min_total_rt_shadows", threshold_min_total_rt_shadows)):
+        if v is not None:
+            filters[k] = float(v)
+    if use_total_rt_shadows is not None:
+        filters["use_total_rt_shadows"] = bool(use_total_rt_shadows)
+
+    today = long_lodf.current_date(eng, market)
+    preset_days = long_lodf.lookback_days(eng, market)
+    if lookback_days is not None:
+        start = long_lodf.lookback_start(today, days=lookback_days)
+    elif lookback_months is not None:
+        start = long_lodf.lookback_start(today, months=lookback_months)
+    else:
+        start = long_lodf.lookback_start(today, days=preset_days)
+    version = datetime.date.fromisoformat(version_date) if version_date else None
+    request_ids = [outage_request_id.strip()] if outage_request_id and outage_request_id.strip() else []
+
+    res = long_lodf.search(eng, market, equipment_ids, request_ids=request_ids, version=version, start=start, stop=today,
+                           filters=filters, apply_regression_ignore_rules=apply_regression_ignore_rules,
+                           warn=warnings.append)
+    rows = res["rows"]
+
+    def fmt_filter(k):
+        v = filters.get(k)
+        return "off" if v is None else f"{v:g}"
+    lines = [f"Market: {market.upper()}", f"Outage: {target}"]
+    if request_ids:
+        lines.append(f"Outage request: {request_ids[0]}")
+    lines += [f"Network model: {res['version']}" + ("" if version else " (EnergyCore's default)"),
+              f"Constraint window: {start} to {today} ({(today - start).days} days)",
+              "Filters: " + "; ".join([f"|LODF| >= {fmt_filter('threshold_min_lodf')}",
+                                       f"post-outage flow % >= {fmt_filter('threshold_min_post_outage_flow_pct_of_limit')}",
+                                       f"|delta| >= {fmt_filter('threshold_min_flow_delta_pct_of_limit')}",
+                                       f"|max delta| >= {fmt_filter('threshold_min_flow_max_delta_pct_of_limit')}",
+                                       ("RT total shadows >= " + f"{filters.get('threshold_min_total_rt_shadows') or 0:g}")
+                                       if filters.get("use_total_rt_shadows") else "RT totals not computed",
+                                       "regression ignore rules " + ("on" if apply_regression_ignore_rules else "off")])
+              + (" (market preset)" if use_market_defaults else "")]
+    if "shadow_window" in res:
+        s0, s1 = res["shadow_window"]
+        lines.append(f"RT totals: {s0} to {s1}, hours the outage was out, summed over each element's active "
+                     f"constraints and their related constraints")
+    if len(equipment_ids) <= 50:
+        page = links.long_lodf(market, equipment_ids, request_ids, start, today,
+                               {k: filters.get(k) for k in long_lodf.FILTER_KEYS}, version, apply_regression_ignore_rules)
+        lines.append(f"Same search in EnergyCore: {links.md('Long-LODF page', page)}")
+
+    if rows.empty:
+        mapped = res.get("mapped_equipment")
+        why = (f"the outage equipment is not mapped to model {res['version']} in the netmap (EnergyCore's page shows "
+               f"nothing either; a trader can map it on the netmap page)" if mapped is not None and not mapped
+               else "no LODF rows pass the filters" if res.get("lodf_rows_before_element_filter", 0) == 0
+               else "no element with an active constraint in the window" if "rows_before_rt_filter" not in res
+               else f"all {res['rows_before_rt_filter']} rows are below the RT total threshold")
+        return "\n".join(lines + ["", f"No results: {why}."] + _warnings_section(warnings))
+
+    me_names = monitored_elements.names(eng, market, rows["official_monitored_element_id"].astype(int).unique())
+    eq_names = outage_groups.equipment_names(eng, market, rows["outage_equipment_id"].astype(int).astype(str).unique(),
+                                             warn=warnings.append)
+    out = rows.copy()
+    out["element"] = [links.md(f"{int(m)} {me_names.get(int(m), '')}".strip(), links.monitored_element(market, int(m)))
+                      for m in out["official_monitored_element_id"]]
+    out["equipment"] = [_equipment_label(market, str(int(e)), eq_names) for e in out["outage_equipment_id"]]
+    out["requests"] = [", ".join(r[:3]) + (f" +{len(r) - 3}" if len(r) > 3 else "") for r in out["request_ids"]]
+    out["groups"] = [", ".join(f"GID {g}" for g in gs) for gs in out["groups"]]
+    out["constraints"] = [", ".join(str(c) for c in cs) for cs in out["constraint_ids"]]
+    out["branches"] = out["mon_br_shortname"].astype(str) + " / " + out["out_br_shortname"].astype(str)
+    for c, d in (("lodf", 3), ("original_flow_mw", 1), ("post_outage_flow_mw", 1), ("line_limit_mw", 1),
+                 ("post_outage_limit_mw_pct", 1), ("flow_increase_pct_of_limit", 2), ("flow_increase_max_pct_of_limit", 2)):
+        out[c] = [("" if v is None or pd.isna(v) else f"{float(v):.{d}f}") for v in out[c]]
+    out.rename(columns={"original_flow_mw": "orig_mw", "post_outage_flow_mw": "post_mw", "line_limit_mw": "limit_mw",
+                        "post_outage_limit_mw_pct": "flow_pct", "flow_increase_pct_of_limit": "delta_pct",
+                        "flow_increase_max_pct_of_limit": "max_delta_pct", "outage_source": "source"}, inplace=True)
+    cols = ["element", "constraints", "lodf", "orig_mw", "post_mw", "limit_mw", "flow_pct", "delta_pct", "max_delta_pct"]
+    if filters.get("use_total_rt_shadows"):
+        out["rt_total"] = [f"{t:,.0f}" + (" *" if b == "all hours" else "") for t, b in zip(out["total_rt_shadows"], out["rt_total_basis"])]
+        cols.append("rt_total")
+    if len(equipment_ids) > 1:
+        cols.insert(0, "equipment")
+    cols += ["requests", "groups", "branches"]
+    if res.get("include_active"):
+        cols.append("source")
+    total = len(out)
+    shown = out.head(max_rows) if max_rows else out
+    lines += ["", f"--- Results ({total}) ---"] + _tsv(shown, cols)
+    if len(shown) < total:
+        lines.append(f"({total - len(shown)} more rows omitted; raise max_rows or set it to 0 to see them.)")
+    if filters.get("use_total_rt_shadows") and (out["rt_total_basis"] == "all hours").any():
+        lines.append("* The outage was never out in the RT window, so, as on the EnergyCore page, this total covers "
+                     "every hour, not outage hours.")
+    if filters.get("use_total_rt_shadows") and (out["rt_total_basis"] == "no overlap").any():
+        warnings.append("Some outages were only out before the 5-year RT window; their totals are 0 (EnergyCore's page "
+                        "errors on these).")
+    elements = ", ".join(str(int(m)) for m in dict.fromkeys(out["official_monitored_element_id"]))
+    lines.append(f"Monitored element IDs: {elements}")
+    return "\n".join(lines + _warnings_section(warnings))
 
 
 @server.prompt()
