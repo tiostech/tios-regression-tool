@@ -81,9 +81,10 @@ def get_flag_icon_svg(flag_type: str) -> str:
 # --- CACHED DATABASE QUERIES ---
 
 @st.cache_data(ttl=3600)
-def fetch_transmission_outage_flags(current_mkt: str, eq_ids_tuple: tuple) -> list[dict]:
-    """Fetches the most recent transmission outage flag notes for non-PJM markets."""
-    return osearch.fetch_transmission_outage_flags(engine, current_mkt, eq_ids_tuple, warn=st.warning)
+def fetch_transmission_outage_flags(current_mkt: str, eq_ids_tuple: tuple, outage_mkt: str) -> list[dict]:
+    """The most recent transmission outage flag notes for these equipment IDs."""
+    return osearch.fetch_transmission_outage_flags(engine, current_mkt, eq_ids_tuple, warn=st.warning,
+                                                   outage_mkt=outage_mkt)
 
 
 @st.cache_data(ttl=3600)
@@ -217,13 +218,13 @@ if st.sidebar.button("Run Search", type="primary"):
             try:
                 # 1. Fetch Outage Annotations & Transmission Outage Flags (cached)
                 annotations = fetch_outage_annotations(tuple(raw_eq_ids), outage_market, current_market)
-                raw_flag_notes = fetch_transmission_outage_flags(current_market, tuple(raw_eq_ids))
+                raw_flag_notes = fetch_transmission_outage_flags(current_market, tuple(raw_eq_ids), outage_market)
 
                 # Deduplicate flag notes by their exact text body
                 flag_notes = osearch.dedupe_flag_notes(raw_flag_notes)
 
-                # Render Transmission Outage Flag Notes box if present (Non-PJM)
-                if current_market.lower() != "pjm" and flag_notes:
+                # Render Transmission Outage Flag Notes box if present
+                if flag_notes:
                     st.subheader("Equipment Flag Notes")
                     for flag in flag_notes:
                         eq_id = flag['outage_id']

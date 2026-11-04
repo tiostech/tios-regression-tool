@@ -156,6 +156,9 @@ counts against your assistant subscription, not a separate API bill.
 | `get_outage_quicklinks` | Every monitored element the desk quicklinked to an outage (and its groups), from any market, across all of its outage requests. |
 | `get_monitored_element_notes` | All desk notes on one or more monitored elements over a date range, without searching note text. |
 | `get_constraint_factors` | A constraint's promoted shift factors (the ones EnergyCore's shadow-based congestion forecasts use): the 100 most positive and 100 most negative pnodes, the winning factor source, and what it was copied from. |
+| `list_flagged_outages` | Every transmission outage the desk flagged over a date range (default: red flags, alert and auto_alert, out today or later), with flag notes, who flagged it, requests, and groups. |
+| `get_generator_outages` | IIR generator outages and derates active in a date range, by plant/unit/owner name, IDs, fuel, outage type, or MW, with each outage's revision history on request. |
+| `get_sced_shadow_prices` | ERCOT SCED-run shadow prices, line flows, and limits: the top constraints over a range, or one constraint's runs by run, hour, or day. |
 | `binding_drivers` (prompt) | Instructions for explaining why the day's highest constraints bound. They live in `prompts/binding_drivers.md`. |
 
 ### Setup (once)

@@ -67,7 +67,10 @@
     {"name": "get_outage_group", "description": "An outage's equipment groups, their associated groups, and every member."},
     {"name": "get_outage_quicklinks", "description": "Monitored elements quicklinked to an outage or group, in any market, over its whole history."},
     {"name": "get_monitored_element_notes", "description": "All desk notes on one or more monitored elements over a date range."},
-    {"name": "get_constraint_factors", "description": "A constraint's promoted shift factors: most positive and most negative pnodes, and the factor source."}
+    {"name": "get_constraint_factors", "description": "A constraint's promoted shift factors: most positive and most negative pnodes, and the factor source."},
+    {"name": "list_flagged_outages", "description": "Every outage the desk flagged (red = alert/auto_alert, watch, safe) over a date range, with the flag notes."},
+    {"name": "get_generator_outages", "description": "IIR generator outages and derates, current or historical, by plant, unit, fuel, or MW, with revision history."},
+    {"name": "get_sced_shadow_prices", "description": "ERCOT shadow prices, flows, and limits from each SCED run, by run, hour, or day."}
   ],
   "tools_generated": false,
   "prompts_generated": true,

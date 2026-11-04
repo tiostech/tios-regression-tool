@@ -176,11 +176,16 @@ OUTAGE_NAME_COLUMNS = {
 
 # --- DIRECT SQL DATABASE QUERY HELPERS ---
 
-def fetch_transmission_outage_flags(engine, current_mkt: str, eq_ids, warn=_no_warn) -> list[dict]:
-    """Fetches the most recent transmission outage flag notes directly from the database for non-PJM markets."""
+def fetch_transmission_outage_flags(engine, current_mkt: str, eq_ids, warn=_no_warn,
+                                    outage_mkt: str | None = None) -> list[dict]:
+    """The most recent transmission outage flag per equipment ID, from ``current_mkt``'s flag
+    table (the page the desk flagged it on), for outages of ``outage_mkt`` (default
+    ``current_mkt``). The table also holds flags on other markets' outages, whose equipment
+    IDs can collide, so rows are matched on outage_type too."""
     c_mkt = current_mkt.lower()
-    if not eq_ids or c_mkt == "pjm":
+    if not eq_ids:
         return []
+    outage_type = f"{(outage_mkt or c_mkt).lower().capitalize()}OutageEquipment"
 
     eq_ids = list(eq_ids)
     try:
@@ -191,10 +196,10 @@ def fetch_transmission_outage_flags(engine, current_mkt: str, eq_ids, warn=_no_w
             flag_query = text(f"""
                 SELECT outage_id, notes, updated_at, flag_type
                 FROM {c_mkt}_transmission_outage_flags
-                WHERE outage_id IN ({placeholders})
+                WHERE outage_id IN ({placeholders}) AND (outage_type = :outage_type OR outage_type IS NULL)
                 ORDER BY updated_at DESC, id DESC
             """)
-            res = conn.execute(flag_query, params).fetchall()
+            res = conn.execute(flag_query, {**params, "outage_type": outage_type}).fetchall()
 
             flags_by_eq = {}
             for row in res:
@@ -967,7 +972,7 @@ def clipboard_text(current_market: str, search_fields: list[str], outage_names: 
     if outage_names:
         clipboard_parts.append(f"Outage Name(s): {', '.join(outage_names)}")
 
-    if current_market.lower() != "pjm" and flag_notes:
+    if flag_notes:
         clipboard_parts.append("")
         clipboard_parts.append("=== FLAG NOTES ===")
         clipboard_parts.append("Equipment ID\tNotes\tLast Update")
