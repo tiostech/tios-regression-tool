@@ -2364,11 +2364,10 @@ def get_fid_changes(market: str, run_id: str | None = None, me_ids: list[int] | 
     for c in changes:
         if not c["diff"]["constraints"].empty:
             all_cids.update(c["diff"]["constraints"]["official_constraint_id"].astype(int))
-    for cid in sorted(all_cids):
-        try:
-            cons_names[cid] = factors.constraint_name(eng, market, cid)[0]
-        except Exception:
-            cons_names[cid] = ""
+    try:
+        cons_names = long_lodf.constraint_names(eng, market, all_cids)
+    except Exception as e:
+        warnings.append(f"Could not look up constraint names: {e}")
 
     def con_label(cid):
         cid = int(cid)

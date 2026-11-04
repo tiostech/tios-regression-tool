@@ -274,8 +274,9 @@ def facility_impacts(frame: pd.DataFrame) -> pd.DataFrame:
                       ascending=[True, True, True, False, False, True], kind="stable")
     picked = f.drop_duplicates(["official_constraint_id", "iso", "facility"])[
         ["official_constraint_id", "iso", "facility", "impact_percentage", "impact_mw"]]
-    out = (frame[frame["active"] == 1].groupby(["official_constraint_id", "iso", "facility"])["dt"]
-           .apply(lambda s: sorted(set(s))).rename("out_days").reset_index())
+    keys = ["official_constraint_id", "iso", "facility"]
+    out = (frame.loc[frame["active"] == 1, keys + ["dt"]].drop_duplicates().sort_values("dt")
+           .groupby(keys)["dt"].agg(list).rename("out_days").reset_index())
     picked = picked.merge(out, on=["official_constraint_id", "iso", "facility"], how="left")
     picked["out_days"] = [d if isinstance(d, list) else [] for d in picked["out_days"]]
     return picked.rename(columns={"impact_percentage": "impact_pct"}).reset_index(drop=True)
