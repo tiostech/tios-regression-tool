@@ -373,12 +373,28 @@ def flow_after_outages(flows: pd.Series, lodf: pd.DataFrame, monitored: int, out
 
 # --- NEIGHBORING MARKETS (MISO) ---
 
-# Whole-table reads that only change with the model version: the IDC equipment maps (~53k
-# rows) and the case's branch list (~68k rows). Each MISO constraint analysis needs them once
-# per neighbor market, and over the SSH tunnel a read takes seconds, so they are kept per
-# version for the life of the server. Callers get copies, since the matching code adds columns.
-@functools.lru_cache(maxsize=4)
+# Whole-table reads that should only change with the model version: the IDC equipment maps
+# (~53k rows) and the case's branch list (~68k rows). Each MISO constraint analysis needs them
+# once per neighbor market, and over the SSH tunnel a read takes seconds, so they are kept for
+# MODEL_CACHE_SECONDS -- briefly, so a read taken while a new model was still loading does not
+# stick for the whole session. Callers get copies, since the matching code adds columns.
+MODEL_CACHE_SECONDS = 10 * 60
+
+
+def _model_cache_slot() -> int:
+    return int(time.time() // MODEL_CACHE_SECONDS)
+
+
 def _eqmap_tables(engine, eq_version) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return _eqmap_tables_cached(engine, eq_version, _model_cache_slot())
+
+
+def _case_branches(engine, market: str, version: datetime.date) -> pd.DataFrame:
+    return _case_branches_cached(engine, market, version, _model_cache_slot())
+
+
+@functools.lru_cache(maxsize=4)
+def _eqmap_tables_cached(engine, eq_version, _slot) -> tuple[pd.DataFrame, pd.DataFrame]:
     with engine.connect() as conn:
         lines = pd.read_sql(text("""
             SELECT CONCAT(ems_line_name, ' ', ems_segment_name) AS branch_name, idc_from_bus_number AS b1,
@@ -394,7 +410,7 @@ def _eqmap_tables(engine, eq_version) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @functools.lru_cache(maxsize=4)
-def _case_branches(engine, market: str, version: datetime.date) -> pd.DataFrame:
+def _case_branches_cached(engine, market: str, version: datetime.date, _slot) -> pd.DataFrame:
     with engine.connect() as conn:
         return pd.read_sql(text(f"""
             SELECT branch_id, bus1_num, bus2_num, bus1_name, bus2_name, line_circuit FROM {market}_pw_branches_{_suffix(version)}

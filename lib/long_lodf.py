@@ -445,11 +445,13 @@ def relation_options(engine, market: str) -> dict:
 
 
 _family_cache = {}
+# Constraint families are edited by the desk; re-read them after this long.
+FAMILY_CACHE_SECONDS = 10 * 60
 
 
 def _family_relatives(engine, market: str) -> dict[int, set[int]]:
     hit = _family_cache.get(market)
-    if hit and time.time() - hit[0] < 3600:
+    if hit and time.time() - hit[0] < FAMILY_CACHE_SECONDS:
         return hit[1]
     rel: dict[int, set[int]] = {}
     if f"{market}_constraint_family_members" in _table_names(engine):

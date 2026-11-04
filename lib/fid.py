@@ -275,8 +275,18 @@ def facility_impacts(frame: pd.DataFrame) -> pd.DataFrame:
     picked = f.drop_duplicates(["official_constraint_id", "iso", "facility"])[
         ["official_constraint_id", "iso", "facility", "impact_percentage", "impact_mw"]]
     keys = ["official_constraint_id", "iso", "facility"]
-    out = (frame.loc[frame["active"] == 1, keys + ["dt"]].drop_duplicates().sort_values("dt")
-           .groupby(keys)["dt"].agg(list).rename("out_days").reset_index())
+    act = frame.loc[frame["active"] == 1, keys + ["dt"]].drop_duplicates()
+    days = sorted(act["dt"].unique())
+    if len(days) <= 62:
+        # Hundreds of thousands of (constraint, facility) pairs but only a week or so of days: sum
+        # one bit per day out (vectorized), then decode the few distinct masks once. Pairs with
+        # the same days share one list object.
+        bit = {d: 1 << i for i, d in enumerate(days)}
+        masks = act.assign(_bit=act["dt"].map(bit).astype("int64")).groupby(keys)["_bit"].sum()
+        decoded = {mk: [d for i, d in enumerate(days) if mk >> i & 1] for mk in masks.unique()}
+        out = masks.map(decoded).rename("out_days").reset_index()
+    else:
+        out = act.sort_values("dt").groupby(keys)["dt"].agg(list).rename("out_days").reset_index()
     picked = picked.merge(out, on=["official_constraint_id", "iso", "facility"], how="left")
     picked["out_days"] = [d if isinstance(d, list) else [] for d in picked["out_days"]]
     return picked.rename(columns={"impact_percentage": "impact_pct"}).reset_index(drop=True)
@@ -316,7 +326,10 @@ def summarize(frame: pd.DataFrame, from_day: datetime.date) -> dict | None:
         fwd.groupby("official_constraint_id")["total_impact_pct"].max())
     peaks = peaks.sort_values("peak_loading_pct", ascending=False).reset_index(drop=True)
     fac = facility_impacts(frame)
-    fac["fwd_out_days"] = [[d for d in o if d >= from_day] for o in fac["out_days"]]
+    # out_days lists are shared between facilities with the same days, so filter each once.
+    memo = {}
+    fac["fwd_out_days"] = [memo[id(o)] if id(o) in memo else memo.setdefault(id(o), [d for d in o if d >= from_day])
+                           for o in fac["out_days"]]
     return {"constraints": peaks, "facilities": fac, "days": days,
             "forward_days": sorted(set(fwd["dt"]))}
 
