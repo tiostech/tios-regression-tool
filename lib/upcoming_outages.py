@@ -197,7 +197,7 @@ def add_history(engine, market: str, outages: list[dict], notes_df: pd.DataFrame
       groups (call add_group_ids first). MISO notes usually name an outage by group (GID), so
       this finds far more than the equipment search.
     - 'annotations': non-archived outage annotations
-    - 'flag_type': the latest transmission outage flag type ('' if none; PJM has no flags)
+    - 'flag_type': the latest transmission outage flag type ('' if none)
     """
     if not outages:
         return
@@ -238,7 +238,7 @@ def add_history(engine, market: str, outages: list[dict], notes_df: pd.DataFrame
 
 def add_flags(engine, market: str, outages: list[dict], warn=_no_warn) -> None:
     """Adds 'flag_type': the latest transmission outage flag type ('' if none, 'flag' for a
-    flag with no type; PJM has no flags)."""
+    flag with no type)."""
     flags = {f["outage_id"]: f for f in
              osearch.fetch_transmission_outage_flags(engine, market, [o["outage_equipment_id"] for o in outages],
                                                      warn=warn)}

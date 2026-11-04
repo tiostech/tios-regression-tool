@@ -22,6 +22,7 @@ so impacts are best read as MW per outage on a typical dispatch, and as % of the
 """
 
 import datetime
+import functools
 import re
 import time
 
@@ -372,6 +373,50 @@ def flow_after_outages(flows: pd.Series, lodf: pd.DataFrame, monitored: int, out
 
 # --- NEIGHBORING MARKETS (MISO) ---
 
+# Whole-table reads that should only change with the model version: the IDC equipment maps
+# (~53k rows) and the case's branch list (~68k rows). Each MISO constraint analysis needs them
+# once per neighbor market, and over the SSH tunnel a read takes seconds, so they are kept for
+# MODEL_CACHE_SECONDS -- briefly, so a read taken while a new model was still loading does not
+# stick for the whole session. Callers get copies, since the matching code adds columns.
+MODEL_CACHE_SECONDS = 10 * 60
+
+
+def _model_cache_slot() -> int:
+    return int(time.time() // MODEL_CACHE_SECONDS)
+
+
+def _eqmap_tables(engine, eq_version) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return _eqmap_tables_cached(engine, eq_version, _model_cache_slot())
+
+
+def _case_branches(engine, market: str, version: datetime.date) -> pd.DataFrame:
+    return _case_branches_cached(engine, market, version, _model_cache_slot())
+
+
+@functools.lru_cache(maxsize=4)
+def _eqmap_tables_cached(engine, eq_version, _slot) -> tuple[pd.DataFrame, pd.DataFrame]:
+    with engine.connect() as conn:
+        lines = pd.read_sql(text("""
+            SELECT CONCAT(ems_line_name, ' ', ems_segment_name) AS branch_name, idc_from_bus_number AS b1,
+                   idc_to_bus_number AS b2, idc_ckt AS ckt, idc_from_bus_name AS n1, idc_to_bus_name AS n2
+            FROM miso_netmodel_eqmap_lines WHERE version_dt = :v
+        """), conn, params={"v": eq_version})
+        xfmrs = pd.read_sql(text("""
+            SELECT CONCAT(ems_station_name, ' ', ems_xfmr_name) AS branch_name, idc_from_bus_number AS b1,
+                   idc_to_bus_number AS b2, idc_ckt AS ckt, idc_from_bus_name AS n1, idc_to_bus_name AS n2
+            FROM miso_netmodel_eqmap_transformers WHERE version_dt = :v
+        """), conn, params={"v": eq_version})
+    return lines, xfmrs
+
+
+@functools.lru_cache(maxsize=4)
+def _case_branches_cached(engine, market: str, version: datetime.date, _slot) -> pd.DataFrame:
+    with engine.connect() as conn:
+        return pd.read_sql(text(f"""
+            SELECT branch_id, bus1_num, bus2_num, bus1_name, bus2_name, line_circuit FROM {market}_pw_branches_{_suffix(version)}
+        """), conn)
+
+
 def neighbor_outage_branches(engine, market: str, version: datetime.date, source_market: str, equipment_ids,
                              warn=None) -> pd.DataFrame:
     """Model branches for another market's outage equipment, for MISO constraints:
@@ -396,19 +441,8 @@ def neighbor_outage_branches(engine, market: str, version: datetime.date, source
             return empty
         eq_version = conn.execute(text("SELECT MAX(version_dt) FROM miso_netmodel_eqmap_lines WHERE version_dt <= :v"),
                                   {"v": version}).scalar() or version
-        lines = pd.read_sql(text("""
-            SELECT CONCAT(ems_line_name, ' ', ems_segment_name) AS branch_name, idc_from_bus_number AS b1,
-                   idc_to_bus_number AS b2, idc_ckt AS ckt, idc_from_bus_name AS n1, idc_to_bus_name AS n2
-            FROM miso_netmodel_eqmap_lines WHERE version_dt = :v
-        """), conn, params={"v": eq_version})
-        xfmrs = pd.read_sql(text("""
-            SELECT CONCAT(ems_station_name, ' ', ems_xfmr_name) AS branch_name, idc_from_bus_number AS b1,
-                   idc_to_bus_number AS b2, idc_ckt AS ckt, idc_from_bus_name AS n1, idc_to_bus_name AS n2
-            FROM miso_netmodel_eqmap_transformers WHERE version_dt = :v
-        """), conn, params={"v": eq_version})
-        branches = pd.read_sql(text(f"""
-            SELECT branch_id, bus1_num, bus2_num, bus1_name, bus2_name, line_circuit FROM {market}_pw_branches_{_suffix(version)}
-        """), conn)
+    lines, xfmrs = (f.copy() for f in _eqmap_tables(engine, eq_version))
+    branches = _case_branches(engine, market, version).copy()
 
     maps["key"] = maps["branch_name"].str.split().str.join(" ")
     eq = pd.concat([lines, xfmrs], ignore_index=True)

@@ -15,7 +15,10 @@ import logging
 import os
 import threading
 import time
+import zoneinfo
+from urllib.parse import urlencode
 
+import numpy as np
 import pandas as pd
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -26,23 +29,32 @@ from lib import autoflow
 from lib import constraint_drivers as drivers
 from lib import db
 from lib import factors
+from lib import fid
+from lib import flags as flags_lib
 from lib import forecast_models
+from lib import iir
 from lib import links
+from lib import long_lodf
 from lib import market_conditions
 from lib import monitored_elements
 from lib import network
+from lib import notes_cache
 from lib import outage_impacts
 from lib import outage_groups
 from lib import outage_search as osearch
+from lib import sced
 from lib import shadow_forecasts
 from lib import upcoming_outages
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 BRIEFING_PROMPT_PATH = os.path.join(_REPO_ROOT, "prompts", "outage_briefing.md")
 DRIVERS_PROMPT_PATH = os.path.join(_REPO_ROOT, "prompts", "binding_drivers.md")
+FID_REVIEW_PROMPT_PATH = os.path.join(_REPO_ROOT, "prompts", "fid_review.md")
 
-# Same lifetime as the page's notes cache.
+# Same lifetime as the page's notes cache (still used for the element link graph).
 NOTES_CACHE_SECONDS = 4 * 60 * 60
+# How often a market's notes are brought up to date; each update reads only changed notes.
+NOTES_REFRESH_SECONDS = 5 * 60
 # Same cap as the page's main search.
 NOTE_RESULT_LIMIT = 2000
 
@@ -78,12 +90,21 @@ server = MCPServer(
         "monitored elements the desk quicklinked to an outage or group (in any market), and "
         "get_monitored_element_notes gives all desk notes on elements over a date range. "
         "get_constraint_factors gives a constraint's promoted shift factors: the most positive and most "
-        "negative pnodes."
+        "negative pnodes. list_flagged_outages lists every outage the desk flagged (red = alert/auto_alert) "
+        "over a date range; get_generator_outages gives IIR generator outages and derates, current or "
+        "historical, with revision history; get_sced_shadow_prices gives ERCOT shadow prices, flows, and "
+        "limits from each SCED run. get_long_lodf_search is EnergyCore's Long-LODF search for an outage: the "
+        "monitored elements it loads (LODFs) with their RT shadow totals while the outage was out, using the "
+        "market's saved preset by default. list_fid_runs lists recent FID (forward impact decomposition) "
+        "assessment runs and how the latest run's element list changed; get_fid_changes reads the latest run's "
+        "results for the biggest upcoming risks (post-outage loading against rating, and the outages driving it) "
+        "and what changed since the previous run; the fid_review prompt holds the instructions."
     ),
 )
 
 _engine = None
 _notes_cache = {}
+_notes_stores = {}
 _notes_locks = {m: threading.Lock() for m in osearch.MARKETS}
 _link_graph_cache = None
 
@@ -96,12 +117,15 @@ def engine():
 
 
 def market_notes(market: str) -> pd.DataFrame:
-    """All quick notes for a market, reloaded after NOTES_CACHE_SECONDS. A load takes 20 seconds
-    or more; a call that arrives during one waits for it instead of starting another."""
+    """All quick notes for a market, the same frame as osearch.load_market_notes. Kept on disk
+    between sessions and brought up to date at most every NOTES_REFRESH_SECONDS with only the
+    notes that changed (lib/notes_cache.py). A call that arrives during a refresh waits for it
+    instead of starting another."""
     with _notes_locks[market]:
         loaded = _notes_cache.get(market)
-        if loaded is None or time.time() - loaded[0] > NOTES_CACHE_SECONDS:
-            loaded = (time.time(), osearch.load_market_notes(engine(), market))
+        if loaded is None or time.time() - loaded[0] > NOTES_REFRESH_SECONDS:
+            store = _notes_stores.setdefault(market, notes_cache.MarketNotes(engine(), market))
+            loaded = (time.time(), store.refresh())
             _notes_cache[market] = loaded
         return loaded[1]
 
@@ -220,8 +244,9 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
             Most MISO outages are circuit breakers.
         min_kv: Only outages at this voltage or higher.
         flags: Only outages whose latest desk flag is one of these, for example
-            ["alert", "watch"]. MISO and SPP flag types: alert, watch, safe, auto_alert,
-            auto_watch, auto_safe. PJM has no flags.
+            ["alert", "watch"]. Flag types: alert, watch, safe, auto_alert,
+            auto_watch, auto_safe. To list every flagged outage over a date range, use
+            list_flagged_outages.
 
     Returns tab-separated rows. note_matches counts notes naming the equipment ID;
     group_note_matches counts notes naming any of its groups. MISO notes usually name an
@@ -343,7 +368,8 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     outage_names = osearch.fetch_outage_names(eng, search_type, outage_id, market, raw_eq_ids, warn=warnings.append)
     annotations = osearch.fetch_outage_annotations(eng, raw_eq_ids, market, notes_market, warn=warnings.append)
     flag_notes = osearch.dedupe_flag_notes(
-        osearch.fetch_transmission_outage_flags(eng, notes_market, raw_eq_ids, warn=warnings.append))
+        osearch.fetch_transmission_outage_flags(eng, notes_market, raw_eq_ids, warn=warnings.append,
+                                                outage_mkt=market))
 
     start_date = osearch.lookback_start_date(lookback, pd.Timestamp.now())
     start_date_str = start_date.strftime("%Y-%m-%d") if start_date is not None else None
@@ -1671,6 +1697,755 @@ def get_constraint_factors(market: str, constraint_id: int, top_n: int = 100, no
     return "\n".join(lines)
 
 
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def list_flagged_outages(market: str, flags: list[str] | None = None, flag_source: str = "both",
+                         start_date: str | None = None, end_date: str | None = None, include_ignored: bool = False,
+                         equipment_types: list[str] | None = None, min_kv: float | None = None,
+                         max_outages: int = 200, max_note_chars: int = 400) -> str:
+    """Every transmission outage the desk has flagged, over a date range: by default all
+    red-flagged outages (alert and auto_alert) that are out today or later.
+
+    EnergyCore colours alert and auto_alert red, watch orange, safe green. auto_* flags are
+    set by EnergyCore, the others by the desk. Flags belong to one outage request; an outage
+    is listed when any of its current-report requests carries one of the flags. Flags set from
+    another market's pages (say a MISO desk flagging a PJM outage) are included and labeled.
+
+    Args:
+        market: Market the outages are in: miso, spp, pjm, ercot, or caiso.
+        flags: Flag names: alert, watch, safe. Default ["alert"].
+        flag_source: both (the default, like EnergyCore's filter), manual (desk flags only),
+            or auto (EnergyCore's auto flags only).
+        start_date: First day, YYYY-MM-DD; outages still out on or after it. Default today.
+            Use an earlier date for past flagged outages.
+        end_date: Last day, YYYY-MM-DD; outages starting on or before it. Default: no limit.
+        include_ignored: Also list outages EnergyCore's regression ignore rules drop (for
+            example cancelled or denied requests).
+        equipment_types: Only these equipment types, for example ["Line", "Transformer"].
+        min_kv: Only outages at this voltage or higher.
+        max_outages: Most outages to list: those starting in the range (soonest first), then those
+            already out (most recent start first). 0 lists all of them.
+        max_note_chars: Longest flag note to show per outage; 0 shows the whole note.
+
+    Returns one row per equipment ID with its flags, dates, requests, groups, and the latest
+    flag note. Follow up with get_outage_documentation or get_outage_group.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    flag_types = flags_lib.flag_type_values(flags or ["alert"], flag_source)
+    start = datetime.date.fromisoformat(start_date) if start_date else datetime.date.today()
+    end = datetime.date.fromisoformat(end_date) if end_date else None
+    if end is not None and end < start:
+        raise ValueError("end_date is before start_date.")
+    eng = engine()
+    warnings = []
+
+    df = flags_lib.flagged_outages(eng, market, flag_types, start, end, apply_ignore_rules=not include_ignored,
+                                   warn=warnings.append)
+    found = df["equipment_id"].nunique()
+    if equipment_types:
+        wanted = {t.strip().lower() for t in equipment_types}
+        df = df[df["equipment_type"].fillna("").str.strip().str.lower().isin(wanted)]
+    if min_kv is not None:
+        df = df[pd.to_numeric(df["kv"], errors="coerce") >= min_kv]
+
+    filters = [f"types {', '.join(equipment_types)}" if equipment_types else "",
+               f"kV >= {min_kv:g}" if min_kv is not None else ""]
+    lines = [f"Market: {market.upper()}",
+             f"Flags: {', '.join(flag_types)}",
+             f"Out from {start.isoformat()} " + (f"through {end.isoformat()}" if end else "onward"),
+             "Filter: current report (most_recent = 1); "
+             + ("ignore rules NOT applied" if include_ignored else "EnergyCore regression_ignore_rules applied")
+             + "".join(f"; {f}" for f in filters if f)]
+    if df.empty:
+        return "\n".join(lines + ["", "No flagged outages."] + _warnings_section(warnings))
+
+    df = df.copy()
+    df["start"] = df["actual_start"].fillna(df["planned_start"])
+    df["end"] = df["actual_end"].fillna(df["planned_end"])
+    df["note_time"] = df["note_updated_at"].fillna(df["flag_updated_at"])
+    users = flags_lib.user_names(eng, df["user_id"].dropna().unique())
+
+    rows = []
+    for eq_id, g in df.groupby("equipment_id", sort=False):
+        latest = g.sort_values("note_time", ascending=False).iloc[0]
+        noted = g[g["notes"].fillna("").str.strip() != ""].sort_values("note_time", ascending=False)
+        note = osearch.clean_body_text_for_raw(noted.iloc[0]["notes"]) if not noted.empty else ""
+        if max_note_chars and len(note) > max_note_chars:
+            note = note[:max_note_chars].rstrip() + " ..."
+        who = noted.iloc[0]["user_id"] if not noted.empty else latest["user_id"]
+        rows.append({
+            "equipment_id": eq_id,
+            "name": links.md(latest["name"], links.outage(market, eq_id)),
+            "equipment_type": latest["equipment_type"] or "",
+            "kv": latest["kv"],
+            "start": g["start"].min(),
+            "end": g["end"].max(),
+            "actual": "yes" if g["actual_start"].notna().any() else "",
+            "request_status": ", ".join(dict.fromkeys(g["request_status"].fillna("").astype(str))),
+            "request_ids": ", ".join(dict.fromkeys(g["request_id"])),
+            "flags": ", ".join(dict.fromkeys(g.sort_values("note_time", ascending=False)["flag_type"])),
+            "flagged_in": ", ".join(m.upper() for m in dict.fromkeys(g["flagged_in"])),
+            "flag_updated": latest["note_time"],
+            "flagged_by": users.get(int(who), "") if who is not None and not pd.isna(who) else "",
+            "note": note,
+        })
+    out = pd.DataFrame(rows)
+    # Outages starting in the range first (soonest first), then the ones already out (latest start first).
+    out["already_out"] = out["start"] < pd.Timestamp(start)
+    out = pd.concat([out[~out["already_out"]].sort_values("start"),
+                     out[out["already_out"]].sort_values("start", ascending=False)])
+    out["when"] = out["already_out"].map({True: "already out", False: "starts in range"})
+    recs = [{"outage_equipment_id": e} for e in out["equipment_id"]]
+    upcoming_outages.add_group_ids(eng, market, recs, warn=warnings.append)
+    out["group_ids"] = [", ".join(links.md(g, links.outage_group(market, g)) if market == "miso" else g
+                                  for g in r["group_ids"]) for r in recs]
+    for c in ("start", "end", "flag_updated"):
+        out[c] = out[c].map(_fmt_dt)
+    if out["flagged_in"].nunique() == 1 and out["flagged_in"].iloc[0] == market.upper():
+        out = out.drop(columns="flagged_in")
+
+    counts = df.groupby("flag_type")["equipment_id"].nunique()
+    lines.append(f"Outages: {len(out)}" + (f" (of {found} before the type and kV filters)" if found != len(out) else "")
+                 + "; by flag: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+    shown = out.head(max_outages) if max_outages else out
+    cols = [c for c in ["equipment_id", "name", "equipment_type", "kv", "when", "start", "end", "actual", "request_status",
+                        "request_ids", "group_ids", "flags", "flagged_in", "flag_updated", "flagged_by", "note"]
+            if c in shown.columns]
+    lines += [""] + _tsv(shown, cols)
+    if len(shown) < len(out):
+        lines.append(f"({len(out) - len(shown)} more outages omitted; raise max_outages or set it to 0 to see them.)")
+    lines.append("Outages starting in the range come first (soonest first), then ones already out (latest start first). "
+                 "start/end are actual times where the ISO reported them (actual = yes), else planned.")
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_generator_outages(market: str, start_date: str | None = None, end_date: str | None = None,
+                          name: str | None = None, plant_ids: list[int] | None = None, unit_ids: list[int] | None = None,
+                          outage_ids: list[int] | None = None, fuels: list[str] | None = None,
+                          outage_types: list[str] | None = None, min_mw: float | None = None,
+                          include_cancelled: bool = False, history: bool = False, max_outages: int = 200) -> str:
+    """Generator outages and derates from IIR, current or historical: the outages active at any
+    time in a date range, optionally for one plant, unit, owner, or fuel, with each outage's
+    revision history on request.
+
+    IIR dates are whole days (start..end inclusive). MW is capacity offline (a derate is less
+    than the unit's capacity). Every outage IIR ever reported is kept, back to the 1980s, so a
+    plant's outage history is a name or plant_ids search with an early start_date.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        start_date: First day, YYYY-MM-DD. Default today, unless name or an ID filter is given,
+            in which case there is no date limit.
+        end_date: Last day, YYYY-MM-DD. Default start_date (outages in effect that day), unless
+            name or an ID filter is given, in which case there is no limit.
+        name: Text to find in the plant, unit, or owner name, for example "Comanche Peak".
+        plant_ids: IIR plant IDs.
+        unit_ids: IIR unit IDs.
+        outage_ids: IIR outage IDs.
+        fuels: Primary fuels, matched as text, for example ["Nuclear"] or ["Coal", "Natural Gas"].
+        outage_types: IIR outage types, for example ["Forced"] or ["Planned"].
+        min_mw: Only outages with at least this many MW offline.
+        include_cancelled: Also list cancelled outages.
+        history: Also list every revision IIR made to each listed outage (dates, MW, type,
+            status), from the snapshots we loaded. Best with a few outages.
+        max_outages: Most outages to list: largest MW first for one day, latest start first for
+            a longer range. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    filtered = bool(name or plant_ids or unit_ids or outage_ids)
+    start = datetime.date.fromisoformat(start_date) if start_date else (None if filtered else datetime.date.today())
+    end = datetime.date.fromisoformat(end_date) if end_date else (None if filtered else start)
+    if start and end and end < start:
+        raise ValueError("end_date is before start_date.")
+    eng = engine()
+    df = iir.search(eng, market, start, end, name=name, plant_ids=plant_ids or (), unit_ids=unit_ids or (),
+                    outage_ids=outage_ids or (), fuels=fuels or (), outage_types=outage_types or (), min_mw=min_mw,
+                    include_cancelled=include_cancelled)
+    one_day = start is not None and start == end
+    if not one_day:
+        df = df.sort_values(["ta_start", "cap_offlin"], ascending=False)
+
+    filters = [f"name like '{name}'" if name else "", f"plants {plant_ids}" if plant_ids else "",
+               f"units {unit_ids}" if unit_ids else "", f"outages {outage_ids}" if outage_ids else "",
+               f"fuels {', '.join(fuels)}" if fuels else "", f"types {', '.join(outage_types)}" if outage_types else "",
+               f">= {min_mw:g} MW" if min_mw is not None else "", "cancelled included" if include_cancelled else ""]
+    dates = (f"{start.isoformat() if start else 'any time'} through {end.isoformat() if end else 'any time'}")
+    lines = [f"Market: {market.upper()}", f"Active: {dates}", "Filters: " + ("; ".join(f for f in filters if f) or "none")]
+    if df.empty:
+        return "\n".join(lines + ["", "No IIR outages."])
+    lines.append(f"Outages: {len(df)}" + (f"; MW offline that day: {df['cap_offlin'].sum():,.0f}" if one_day else ""))
+    by_fuel = df.groupby(df["prim_fuel"].fillna("?"))["cap_offlin"].agg(["size", "sum"]).sort_values("sum", ascending=False)
+    lines.append("By fuel: " + "; ".join(f"{f} {int(r['size'])} ({r['sum']:,.0f} MW)" for f, r in by_fuel.head(8).iterrows()))
+
+    shown = df.head(max_outages) if max_outages else df
+    shown = shown.copy()
+    shown["outage"] = [links.md(o, f"{links.BASE}/{market}/iir_outages?commit=1&outage_ids={o}") for o in shown["outage_id"]]
+    shown["was"] = [f"{a or ''}..{b or ''}" if (a is not None and not pd.isna(a)) or (b is not None and not pd.isna(b)) else ""
+                    for a, b in zip(shown["prv_ta_st"], shown["prv_ta_end"])]
+    shown["comments"] = shown["comments"].fillna("").map(lambda c: c[:200])
+    shown["updated"] = shown["updated_at"].map(_fmt_dt)
+    cols = ["outage", "plant_name", "unit_name", "unit_id", "plant_id", "owner_name", "prim_fuel", "out_design",
+            "cap_offlin", "ta_start", "ta_end", "was", "outage_typ", "outage_sta", "out_cause", "updated", "comments"]
+    lines += [""] + _tsv(shown, cols)
+    if len(shown) < len(df):
+        lines.append(f"({len(df) - len(shown)} {'smaller' if one_day else 'earlier'} outages omitted; "
+                     "raise max_outages or set it to 0 to see them.)")
+    lines.append("out_design = unit capacity MW, cap_offlin = MW offline, was = dates before the last revision.")
+
+    if history:
+        rev = iir.changes(iir.revisions(eng, market, shown))
+        lines += ["", f"--- Revision history ({len(rev)} versions that changed dates, MW, type, or status) ---"]
+        if rev.empty:
+            lines.append("No snapshots for these outages.")
+        else:
+            rev = rev.copy()
+            rev["loaded"] = rev["for_date"].map(_fmt_dt)
+            rev["comments"] = rev["comments"].fillna("").map(lambda c: c[:150])
+            lines += _tsv(rev, ["outage_id", "loaded", "ta_start", "ta_end", "cap_offlin", "outage_typ", "outage_sta",
+                                "out_cause", "comments"])
+    return "\n".join(lines)
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_sced_shadow_prices(constraint_ids: list[int] | None = None, me_ids: list[int] | None = None,
+                           name: str | None = None, start_date: str | None = None, end_date: str | None = None,
+                           granularity: str = "hour", top: int = 25, max_rows: int = 500) -> str:
+    """ERCOT shadow prices from each SCED run (about every 5 minutes), with line flow and limit:
+    finer than the hourly RT shadow prices. ERCOT lists constraints that bind or nearly bind, so
+    some runs have a $0 shadow price; binding_runs counts those above $0.
+
+    With no constraint, element, or name: the constraints with the most total SCED shadow price
+    in the range (a summary). With one: a summary of each matching constraint, then its binding
+    runs, rolled up by hour or day or listed run by run.
+
+    Args:
+        constraint_ids: Official ERCOT constraint IDs.
+        me_ids: Monitored element IDs (every constraint on the element).
+        name: Text to find in the constraint name ERCOT published, for example "PNHNDL".
+        start_date: First day, YYYY-MM-DD, market local time. Default yesterday.
+        end_date: Last day, YYYY-MM-DD. Default today.
+        granularity: run (every SCED run), hour (hour ending HE1-24), or day.
+        top: Constraints to list in the summary.
+        max_rows: Most detail rows to list (oldest first). 0 lists all of them.
+    """
+    _check_choice("granularity", granularity, sced.GRANULARITIES)
+    today = datetime.date.today()
+    start = datetime.date.fromisoformat(start_date) if start_date else today - datetime.timedelta(days=1)
+    end = datetime.date.fromisoformat(end_date) if end_date else (start if start_date else today)
+    if end < start:
+        raise ValueError("end_date is before start_date.")
+    if (end - start).days > 92:
+        raise ValueError("Ask for at most 92 days at a time; SCED runs are every 5 minutes.")
+    eng = engine()
+    filters = dict(constraint_ids=constraint_ids or (), me_ids=me_ids or (), name=name)
+    focused = bool(constraint_ids or me_ids or name)
+
+    summ = sced.summary(eng, start, end, **filters)
+    lines = ["Market: ERCOT (SCED-run shadow prices)", f"Dates: {start.isoformat()} through {end.isoformat()}"]
+    if focused:
+        lines.append("Filter: " + "; ".join(f for f in (f"constraints {constraint_ids}" if constraint_ids else "",
+                                                       f"elements {me_ids}" if me_ids else "",
+                                                       f"name like '{name}'" if name else "") if f))
+    if summ.empty:
+        return "\n".join(lines + ["", "No SCED runs listed these constraints."])
+
+    def label(cid, cname):
+        return links.md(f"{int(cid)} {cname or ''}".strip(), links.constraint("ercot", cid, start, end))
+
+    summ = summ.copy()
+    summ["constraint"] = [label(c, n) for c, n in zip(summ["constraint_id"], summ["constraint_name"])]
+    summ["element"] = [links.md(int(m), links.monitored_element("ercot", m)) if m is not None and not pd.isna(m) else ""
+                       for m in summ["me_id"]]
+    for c in ("first_run", "last_run"):
+        summ[c] = summ[c].map(_fmt_dt)
+    shown = summ.head(top)
+    lines += ["", f"--- Constraints ({len(summ)} listed, {int((summ['binding_runs'] > 0).sum())} bound; "
+                  f"top {len(shown)} by total shadow price) ---"]
+    lines += _tsv(shown, ["constraint", "element", "runs", "binding_runs", "binding_hours", "total_shadow", "avg_shadow", "max_shadow",
+                          "max_flow_pct", "first_run", "last_run"], decimals=1)
+    if not focused:
+        lines.append("Pass constraint_ids, me_ids, or name for the run-by-run detail.")
+        return "\n".join(lines)
+
+    detail = sced.aggregate(sced.runs(eng, start, end, **filters), granularity)
+    total = len(detail)
+    detail = detail.head(max_rows) if max_rows else detail
+    lines += ["", f"--- SCED runs by {granularity} ({total} rows, oldest first) ---"]
+    if granularity == "run":
+        detail = detail.assign(run=detail["sced_run"].map(lambda t: t.strftime("%Y-%m-%d %H:%M:%S")),
+                               flow_pct=100 * detail["line_flow"] / detail["line_limit"].where(detail["line_limit"] > 0))
+        cols = ["run", "constraint_id", "shadow_price", "line_flow", "line_limit", "flow_pct", "preliminary"]
+    else:
+        cols = ["date"] + (["he"] if granularity == "hour" else []) + ["constraint_id", "runs", "binding_runs", "avg_shadow",
+                                                                        "max_shadow", "avg_flow", "avg_limit", "max_flow_pct"]
+    lines += _tsv(detail, cols, decimals=1)
+    if len(detail) < total:
+        lines.append(f"({total - len(detail)} later rows omitted; raise max_rows, set it to 0, or use a coarser granularity.)")
+    return "\n".join(lines)
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_long_lodf_search(market: str, outage_id: str, id_type: str = "equipment", outage_request_id: str | None = None,
+                         lookback_days: int | None = None, lookback_months: int | None = None,
+                         threshold_min_lodf: float | None = None,
+                         threshold_min_post_outage_flow_pct_of_limit: float | None = None,
+                         threshold_min_flow_delta_pct_of_limit: float | None = None,
+                         threshold_min_flow_max_delta_pct_of_limit: float | None = None,
+                         threshold_min_total_rt_shadows: float | None = None,
+                         use_total_rt_shadows: bool | None = None, apply_regression_ignore_rules: bool = False,
+                         use_market_defaults: bool = True, version_date: str | None = None, max_rows: int = 100) -> str:
+    """EnergyCore's "Long-LODF" search for an outage (the link on the outage search pages): the
+    monitored elements the outage loads, from the PowerWorld LODFs, with each element's active
+    constraints and their total RT shadow prices over the last 5 years while the outage (or its
+    groups) was out. Same query, formulas, and filters as the page.
+
+    Elements: those with a constraint active (DA/RT shadow or RT forecast) in the lookback
+    window. Delta = flow change as % of the monitored limit (signed: negative when the flow
+    drops); max delta = outage-branch limit / monitored limit x LODF. Sorted by delta, then LODF.
+
+    Defaults come from the market's saved preset (lodf_default_filters) and lookback
+    (lodf_link_lookback_days), exactly what the page uses. PJM's preset: 540 days, max delta >= 7,
+    RT shadows >= 100, regression ignore rules off. MISO's: 6 months, max delta >= 10, RT total
+    >= 0. Any threshold you pass replaces the preset's; pass 0 to turn a threshold off, or set
+    use_market_defaults=false to start from no thresholds.
+
+    Args:
+        market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
+        outage_id: One outage equipment ID, or a group ID (searches every member of the group and
+            of its associated groups).
+        id_type: equipment or group.
+        outage_request_id: Only this outage request (the page's link passes the row's request).
+            Default: every request for the equipment (LODF values don't depend on the request).
+        lookback_days: Constraint window in days back from today. Default: the market's preset.
+        lookback_months: Same, in months (used when lookback_days is not given).
+        threshold_min_lodf: |LODF| at least this (LODFs are in percent).
+        threshold_min_post_outage_flow_pct_of_limit: Post-outage flow at least this % of the limit.
+        threshold_min_flow_delta_pct_of_limit: |Delta| at least this %.
+        threshold_min_flow_max_delta_pct_of_limit: |Max delta| at least this %.
+        threshold_min_total_rt_shadows: Total RT shadows at least this ($). Needs use_total_rt_shadows.
+        use_total_rt_shadows: Compute the RT shadow totals and apply their threshold (slower).
+        apply_regression_ignore_rules: Drop outage records the regression ignore rules exclude
+            (cancelled/denied requests and the like). Off on the outage pages' links.
+        use_market_defaults: Start from the market's saved filter preset (true) or from no thresholds
+            and no RT totals (false). The lookback always defaults to the market's.
+        version_date: Network model date (YYYY-MM-DD). Default: the model EnergyCore marks default.
+        max_rows: Most rows to list. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("id_type", id_type, ["equipment", "group"])
+    if lookback_days is not None and lookback_days < 1 or lookback_months is not None and lookback_months < 1:
+        raise ValueError("lookback_days and lookback_months must be at least 1.")
+    eng = engine()
+    warnings = []
+    cleaned = osearch.clean_id(outage_id)
+    if not cleaned or not cleaned.isdigit():
+        raise ValueError(f"'{outage_id}' is not an equipment or group ID.")
+
+    if id_type == "group":
+        assoc = outage_groups.associations(eng, market, [cleaned])
+        group_ids = list(dict.fromkeys([cleaned] + assoc[assoc["group_id"] == cleaned]["associated_group_id"].tolist()))
+        equipment_ids = sorted({int(e) for e in outage_groups.members(eng, market, group_ids)["equipment_id"]})
+        if not equipment_ids:
+            return f"Market: {market.upper()}\nOutage group {cleaned} has no (non-removed) members."
+        target = _group_label(market, cleaned) + f" ({len(equipment_ids)} member equipment IDs"
+        target += (", with associated " + ", ".join(_group_label(market, g) for g in group_ids[1:]) + ")") if len(group_ids) > 1 else ")"
+    else:
+        equipment_ids = [int(cleaned)]
+        names = outage_groups.equipment_names(eng, market, [cleaned], warn=warnings.append)
+        target = _equipment_label(market, cleaned, names)
+
+    filters = long_lodf.default_filters(eng, market) if use_market_defaults else {k: None for k in long_lodf.FILTER_KEYS}
+    if not use_market_defaults:
+        filters["use_total_rt_shadows"] = False
+    for k, v in (("threshold_min_lodf", threshold_min_lodf),
+                 ("threshold_min_post_outage_flow_pct_of_limit", threshold_min_post_outage_flow_pct_of_limit),
+                 ("threshold_min_flow_delta_pct_of_limit", threshold_min_flow_delta_pct_of_limit),
+                 ("threshold_min_flow_max_delta_pct_of_limit", threshold_min_flow_max_delta_pct_of_limit),
+                 ("threshold_min_total_rt_shadows", threshold_min_total_rt_shadows)):
+        if v is not None:
+            filters[k] = float(v)
+    if use_total_rt_shadows is not None:
+        filters["use_total_rt_shadows"] = bool(use_total_rt_shadows)
+
+    today = long_lodf.current_date(eng, market)
+    preset_days = long_lodf.lookback_days(eng, market)
+    if lookback_days is not None:
+        start = long_lodf.lookback_start(today, days=lookback_days)
+    elif lookback_months is not None:
+        start = long_lodf.lookback_start(today, months=lookback_months)
+    else:
+        start = long_lodf.lookback_start(today, days=preset_days)
+    version = datetime.date.fromisoformat(version_date) if version_date else None
+    request_ids = [outage_request_id.strip()] if outage_request_id and outage_request_id.strip() else []
+
+    res = long_lodf.search(eng, market, equipment_ids, request_ids=request_ids, version=version, start=start, stop=today,
+                           filters=filters, apply_regression_ignore_rules=apply_regression_ignore_rules,
+                           warn=warnings.append)
+    rows = res["rows"]
+
+    def fmt_filter(k):
+        v = filters.get(k)
+        return "off" if v is None else f"{v:g}"
+    lines = [f"Market: {market.upper()}", f"Outage: {target}"]
+    if request_ids:
+        lines.append(f"Outage request: {request_ids[0]}")
+    lines += [f"Network model: {res['version']}" + ("" if version else " (EnergyCore's default)"),
+              f"Constraint window: {start} to {today} ({(today - start).days} days)",
+              "Filters: " + "; ".join([f"|LODF| >= {fmt_filter('threshold_min_lodf')}",
+                                       f"post-outage flow % >= {fmt_filter('threshold_min_post_outage_flow_pct_of_limit')}",
+                                       f"|delta| >= {fmt_filter('threshold_min_flow_delta_pct_of_limit')}",
+                                       f"|max delta| >= {fmt_filter('threshold_min_flow_max_delta_pct_of_limit')}",
+                                       ("RT total shadows >= " + f"{filters.get('threshold_min_total_rt_shadows') or 0:g}")
+                                       if filters.get("use_total_rt_shadows") else "RT totals not computed",
+                                       "regression ignore rules " + ("on" if apply_regression_ignore_rules else "off")])
+              + (" (market preset)" if use_market_defaults else "")]
+    if "shadow_window" in res:
+        s0, s1 = res["shadow_window"]
+        lines.append(f"RT totals: {s0} to {s1}, hours the outage was out, summed over each element's active "
+                     f"constraints and their related constraints")
+    if len(equipment_ids) <= 50:
+        page = links.long_lodf(market, equipment_ids, request_ids, start, today,
+                               {k: filters.get(k) for k in long_lodf.FILTER_KEYS}, version, apply_regression_ignore_rules)
+        lines.append(f"Same search in EnergyCore: {links.md('Long-LODF page', page)}")
+
+    if rows.empty:
+        mapped = res.get("mapped_equipment")
+        why = (f"the outage equipment is not mapped to model {res['version']} in the netmap (EnergyCore's page shows "
+               f"nothing either; a trader can map it on the netmap page)" if mapped is not None and not mapped
+               else "no LODF rows pass the filters" if res.get("lodf_rows_before_element_filter", 0) == 0
+               else "no element with an active constraint in the window" if "rows_before_rt_filter" not in res
+               else f"all {res['rows_before_rt_filter']} rows are below the RT total threshold")
+        return "\n".join(lines + ["", f"No results: {why}."] + _warnings_section(warnings))
+
+    me_names = monitored_elements.names(eng, market, rows["official_monitored_element_id"].astype(int).unique())
+    eq_names = outage_groups.equipment_names(eng, market, rows["outage_equipment_id"].astype(int).astype(str).unique(),
+                                             warn=warnings.append)
+    out = rows.copy()
+    out["element"] = [links.md(f"{int(m)} {me_names.get(int(m), '')}".strip(), links.monitored_element(market, int(m)))
+                      for m in out["official_monitored_element_id"]]
+    out["equipment"] = [_equipment_label(market, str(int(e)), eq_names) for e in out["outage_equipment_id"]]
+    out["requests"] = [", ".join(r[:3]) + (f" +{len(r) - 3}" if len(r) > 3 else "") for r in out["request_ids"]]
+    out["groups"] = [", ".join(f"GID {g}" for g in gs) for gs in out["groups"]]
+    out["constraints"] = [", ".join(str(c) for c in cs) for cs in out["constraint_ids"]]
+    out["branches"] = out["mon_br_shortname"].astype(str) + " / " + out["out_br_shortname"].astype(str)
+    for c, d in (("lodf", 3), ("original_flow_mw", 1), ("post_outage_flow_mw", 1), ("line_limit_mw", 1),
+                 ("post_outage_limit_mw_pct", 1), ("flow_increase_pct_of_limit", 2), ("flow_increase_max_pct_of_limit", 2)):
+        out[c] = [("" if v is None or pd.isna(v) else f"{float(v):.{d}f}") for v in out[c]]
+    out.rename(columns={"original_flow_mw": "orig_mw", "post_outage_flow_mw": "post_mw", "line_limit_mw": "limit_mw",
+                        "post_outage_limit_mw_pct": "flow_pct", "flow_increase_pct_of_limit": "delta_pct",
+                        "flow_increase_max_pct_of_limit": "max_delta_pct", "outage_source": "source"}, inplace=True)
+    cols = ["element", "constraints", "lodf", "orig_mw", "post_mw", "limit_mw", "flow_pct", "delta_pct", "max_delta_pct"]
+    if filters.get("use_total_rt_shadows"):
+        out["rt_total"] = [f"{t:,.0f}" + (" *" if b == "all hours" else "") for t, b in zip(out["total_rt_shadows"], out["rt_total_basis"])]
+        cols.append("rt_total")
+    if len(equipment_ids) > 1:
+        cols.insert(0, "equipment")
+    cols += ["requests", "groups", "branches"]
+    if res.get("include_active"):
+        cols.append("source")
+    total = len(out)
+    shown = out.head(max_rows) if max_rows else out
+    lines += ["", f"--- Results ({total}) ---"] + _tsv(shown, cols)
+    if len(shown) < total:
+        lines.append(f"({total - len(shown)} more rows omitted; raise max_rows or set it to 0 to see them.)")
+    if filters.get("use_total_rt_shadows") and (out["rt_total_basis"] == "all hours").any():
+        lines.append("* The outage was never out in the RT window, so, as on the EnergyCore page, this total covers "
+                     "every hour, not outage hours.")
+    if filters.get("use_total_rt_shadows") and (out["rt_total_basis"] == "no overlap").any():
+        warnings.append("Some outages were only out before the 5-year RT window; their totals are 0 (EnergyCore's page "
+                        "errors on these).")
+    elements = ", ".join(str(int(m)) for m in dict.fromkeys(out["official_monitored_element_id"]))
+    lines.append(f"Monitored element IDs: {elements}")
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+_CENTRAL = zoneinfo.ZoneInfo("America/Chicago")
+# Elements named (with links) in each added/dropped list before the rest go as bare IDs.
+LIST_CAP = 25
+
+
+def _ct(value) -> str:
+    """A UTC naive datetime from the database, shown in Central time."""
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).tz_localize("UTC").tz_convert(_CENTRAL).strftime("%Y-%m-%d %H:%M CT")
+
+
+def _fid_page(market: str, me_id, run_id: str, market_date) -> str:
+    query = urlencode({"build": 1, "monelem_id[]": int(me_id), "run_id": run_id, "date": str(market_date)})
+    return f"{links.BASE}/{market}/powerflow/fid_results?{query}"
+
+
+def _run_line(r) -> str:
+    window = f"{r['start_dt']} .. {r['end_dt']}"
+    return (f"{r['run_id']} ({r['kind']}, {r['label']}) started {_ct(r['started_at'])}, window {window}, "
+            f"SE case {r['se_case'] or '?'}")
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def list_fid_runs(market: str, days: int = 2, include_adhoc: bool = True) -> str:
+    """Recent FID (forward impact decomposition) assessment runs and how the latest scheduled
+    run's element list differs from the one before it. Reads only the run index in MySQL.
+
+    Scheduled runs start about 00:00, 10:00 and 14:30 Central and assess the desk's Always Run
+    list plus elements picked by RT, DA, and forecast shadow price thresholds and annotated
+    outages starting, over a window of about 3 days back to 3 days forward. Ad-hoc runs are ones
+    a trader queued for a few elements. Use get_fid_changes for what the results say.
+
+    Args:
+        market: ercot, miso, pjm, or spp.
+        days: Market days to list, today included.
+        include_adhoc: Also list ad-hoc runs.
+    """
+    _check_choice("market", market, fid.FID_MARKETS)
+    if days < 1:
+        raise ValueError("days must be at least 1.")
+    eng = engine()
+    today = datetime.date.today()
+    df = fid.runs(eng, market, today - datetime.timedelta(days=days - 1), today)
+    if not include_adhoc:
+        df = df[df["kind"] == "scheduled"]
+    lines = [f"{market.upper()} FID runs, market days {today - datetime.timedelta(days=days - 1)} to {today} "
+             "(times in Central)"]
+    if df.empty:
+        return "\n".join(lines + ["", "No runs."])
+    df = df.copy()
+    df["started"] = df["started_at"].map(_ct)
+    df["finished"] = df["finished_at"].map(_ct)
+    df["window"] = df["start_dt"].astype(str) + " .. " + df["end_dt"].astype(str)
+    df["failure"] = df["failure"].fillna("").str.slice(0, 120)
+    df["timed_out"] = df["timed_out"].map(lambda v: "yes" if v else "")
+    lines += ["", "label: complete, failed, in progress, or incomplete (still marked running long after it should "
+              "have finished; the process died). monelems = elements written so far; errors = queries that failed.", ""]
+    lines += _tsv(df, ["run_id", "kind", "label", "started", "finished", "window", "se_case", "requested_count",
+                       "monelems", "error_count", "timed_out", "failure"])
+
+    latest = fid.latest_run(eng, market)
+    if latest is None:
+        return "\n".join(lines)
+    prev = fid.latest_run(eng, market, before=latest["started_at"])
+    cur = fid.run_monelems(eng, market, latest["run_id"])
+    lines += ["", "--- Latest complete scheduled run ---", _run_line(latest),
+              f"Elements written: {len(cur)} of {latest['requested_count']} requested"]
+    counts = pd.Series([r for rs in cur["reasons"] for r in rs]).value_counts()
+    if not counts.empty:
+        lines.append("Picked for: " + ", ".join(f"{fid.REASON_LABELS.get(k, k)} {v}" for k, v in counts.items()))
+    sources = cur["se_case_source"].fillna("?").value_counts()
+    lines.append("SE case chosen by: " + ", ".join(f"{k} {v}" for k, v in sources.items())
+                 + " (selected = the daily loading scan, override = a trader, pinned = whoever queued the run, "
+                   "current = the newest case)")
+    if prev is None:
+        return "\n".join(lines)
+    diff = fid.compare_run_index(cur, fid.run_monelems(eng, market, prev["run_id"]))
+    names = monitored_elements.names(eng, market, diff["added"] + diff["dropped"] + [c[0] for c in diff["case_changed"]])
+
+    def me(i):
+        return links.md(f"{i} {names.get(i, '')}".strip(), links.monitored_element(market, i))
+
+    reasons = dict(zip(cur["me_id"], cur["reasons"]))
+
+    def listed(ids, fmt):
+        shown = "; ".join(fmt(i) for i in ids[:LIST_CAP]) or "none"
+        return shown + (f"; and {len(ids) - LIST_CAP} more: " + ", ".join(map(str, ids[LIST_CAP:])) if len(ids) > LIST_CAP else "")
+
+    lines += ["", "--- Compared with the previous complete scheduled run ---", _run_line(prev)]
+    lines.append(f"Added ({len(diff['added'])}): " + listed(diff["added"], lambda i: (
+        f"{me(i)} [{', '.join(fid.REASON_LABELS.get(r, r) for r in reasons.get(i, [])) or 'no reason recorded'}]")))
+    lines.append(f"Dropped ({len(diff['dropped'])}): " + listed(diff["dropped"], me))
+    if diff["case_changed"]:
+        lines.append(f"SE case changed ({len(diff['case_changed'])}): "
+                     + "; ".join(f"{me(i)} {o} -> {n}" for i, o, n in diff["case_changed"][:LIST_CAP]))
+    return "\n".join(lines)
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_fid_changes(market: str, run_id: str | None = None, me_ids: list[int] | None = None, top_n: int = 15,
+                    outages_per_element: int = 5, change_pct: float = 2.0) -> str:
+    """What the latest FID run says: the biggest upcoming risks (constraints whose post-outage
+    flow gets closest to or over the element's rating on the days ahead, and the outages driving
+    them) and what changed since the previous run that assessed each element.
+
+    Reads the run's result files on S3 (s3://tios-fid-production), which needs AWS credentials
+    with read access to that bucket on this machine; without them the tool says so.
+
+    Numbers follow EnergyCore's FID Assessment Results page:
+    - loading_pct: post-outage flow (base-case flow + the day's total outage impact) as % of
+      the monitored element's Rating B. Over 100 means the outages scheduled that day push the
+      element over its rating in that contingency.
+    - impact_pct: one outage's impact on the constraint, % of rating; + loads, - shields.
+      Outages under 1% either way are left out, as on the page.
+    - Upcoming means today and later. Changes compare the forward days both runs cover; a
+      different SE case between the runs can change every number.
+
+    Args:
+        market: ercot, miso, pjm, or spp.
+        run_id: The run to read. Default: the latest complete scheduled run.
+        me_ids: Only these monitored elements (they must be in the run).
+        top_n: Elements to list in each section.
+        outages_per_element: Outages to list per element.
+        change_pct: Smallest change in an outage's impact (percentage points) to report.
+    """
+    _check_choice("market", market, fid.FID_MARKETS)
+    eng = engine()
+    warnings = []
+    if run_id:
+        cur_run = fid.run(eng, market, run_id.strip())
+        if cur_run is None:
+            raise ValueError(f"No {market.upper()} FID run {run_id}.")
+    else:
+        cur_run = fid.latest_run(eng, market)
+        if cur_run is None:
+            return f"No complete scheduled {market.upper()} FID runs."
+    cur = fid.run_monelems(eng, market, cur_run["run_id"])
+    if me_ids:
+        missing = sorted({int(i) for i in me_ids} - set(cur["me_id"]))
+        if missing:
+            warnings.append(f"Not written by run {cur_run['run_id']}: {', '.join(map(str, missing))}")
+        cur = cur[cur["me_id"].isin([int(i) for i in me_ids])]
+    lines = [f"=== {market.upper()} FID run {_run_line(cur_run)} ===",
+             f"Elements: {len(cur)}"]
+    if cur_run["label"] != "complete":
+        lines.append(f"Note: this run is {cur_run['label']}; results cover only the elements written so far.")
+    if cur.empty:
+        return "\n".join(lines + _warnings_section(warnings))
+
+    prev = fid.previous_runs_for(eng, market, cur["me_id"], cur_run["started_at"])
+    prev_by_me = prev.set_index("me_id").to_dict("index")
+    pairs = [(cur_run["run_id"], int(m)) for m in cur["me_id"]] + [(p["run_id"], int(m)) for m, p in prev_by_me.items()]
+    try:
+        frames = fid.read_frames(fid.s3_client(), market, pairs)
+    except fid.S3Unavailable as e:
+        raise ToolError(f"{e} The run index (list_fid_runs) still works without S3.") from e
+
+    today = datetime.date.today()
+    names = monitored_elements.names(eng, market, cur["me_id"])
+    shadows = {}
+    try:
+        shadows = fid.rt_shadow_totals(eng, market, cur["me_id"], today)
+    except Exception as e:
+        warnings.append(f"Could not read RT shadow totals: {e}")
+    cases = dict(zip(cur["me_id"], cur["se_case"]))
+
+    risks, changes, no_output = [], [], []
+    for m in cur["me_id"]:
+        m = int(m)
+        new = fid.summarize(frames.get((cur_run["run_id"], m)), today)
+        if new is None:
+            no_output.append(m)
+            continue
+        p = prev_by_me.get(m)
+        old = fid.summarize(frames.get((p["run_id"], m)), today) if p else None
+        cons = new["constraints"]
+        if not cons.empty:
+            top = cons.iloc[0]
+            risks.append({"me_id": m, "summary": new, "top": top})
+        diff = fid.compare(new, old, change_pct=change_pct)
+        if p is None:
+            changes.append({"me_id": m, "status": "no earlier run in the last 2 weeks", "diff": diff, "prev": None,
+                            "score": np.inf})
+        elif old is None:
+            changes.append({"me_id": m, "status": "earlier run wrote no results", "diff": diff, "prev": p,
+                            "score": np.inf})
+        else:
+            c = diff["constraints"]
+            score = c["change_pct"].abs().max() if not c.empty and c["change_pct"].notna().any() else 0
+            if not diff["facilities"].empty or score >= change_pct:
+                changes.append({"me_id": m, "status": "", "diff": diff, "prev": p, "score": score})
+
+    def me_label(m):
+        return links.md(f"{m} {names.get(m, '')}".strip(), links.monitored_element(market, m))
+
+    def fac_label(r):
+        return f"{r['iso'].upper()} {r['facility']}"
+
+    cons_names = {}
+    all_cids = set()
+    for r in risks:
+        all_cids.update(r["summary"]["constraints"]["official_constraint_id"].astype(int))
+    for c in changes:
+        if not c["diff"]["constraints"].empty:
+            all_cids.update(c["diff"]["constraints"]["official_constraint_id"].astype(int))
+    try:
+        cons_names = long_lodf.constraint_names(eng, market, all_cids)
+    except Exception as e:
+        warnings.append(f"Could not look up constraint names: {e}")
+
+    def con_label(cid):
+        cid = int(cid)
+        return links.md(f"{cid} {cons_names.get(cid, '')}".strip(),
+                        links.constraint(market, cid, today - datetime.timedelta(days=13), today))
+
+    risks.sort(key=lambda r: -r["top"]["peak_loading_pct"])
+    lines += ["", f"--- Biggest upcoming risks (peak post-outage loading from {today} on, top {min(top_n, len(risks))} "
+              f"of {len(risks)} elements) ---"]
+    if not risks:
+        lines.append("No element has results for today or later.")
+    for r in risks[:top_n]:
+        m, top, s = r["me_id"], r["top"], r["summary"]
+        rt = shadows.get(m)
+        lines += ["", f"{me_label(m)} ([FID page]({_fid_page(market, m, cur_run['run_id'], cur_run['market_date'])}))",
+                  f"Constraint {con_label(top['official_constraint_id'])}: peak loading {top['peak_loading_pct']:.0f}% of "
+                  f"Rating B {top['rating_b']:.0f} MW on {top['peak_day']} (base case {top['base_pct']:.0f}%, outages "
+                  f"{top['impact_on_peak_day_pct']:+.0f}%); SE case {cases.get(m) or '?'}"
+                  + (f"; RT shadow total last 14 days ${rt:,.0f}" if rt else "; no RT shadow prices in the last 14 days")]
+        others = s["constraints"].iloc[1:4]
+        if not others.empty:
+            lines.append("Other constraints: " + "; ".join(
+                f"{con_label(o['official_constraint_id'])} {o['peak_loading_pct']:.0f}% on {o['peak_day']}"
+                for _, o in others.iterrows()))
+        outs = fid.top_outages(s, top["official_constraint_id"], outages_per_element)
+        if outs.empty:
+            lines.append("No outage with 1% or more impact is out on the days ahead.")
+        else:
+            lines.append("Outages out on the days ahead (impact on this constraint; days out):")
+            lines += [f"  {fac_label(o)}: {o['impact_pct']:+.1f}% ({o['impact_mw']:+.1f} MW); out "
+                      f"{fid._days(o['fwd_out_days'])}" for _, o in outs.iterrows()]
+
+    changes.sort(key=lambda c: -c["score"])
+    shown = [c for c in changes if c["status"] == ""][:top_n]
+    lines += ["", f"--- Changes since each element's previous run ({len(shown)} shown of "
+              f"{sum(1 for c in changes if c['status'] == '')} elements with changes) ---"]
+    if not shown:
+        lines.append(f"No loading change of {change_pct:g} points or more and no outage changes.")
+    for c in shown:
+        m, d, p = c["me_id"], c["diff"], c["prev"]
+        head = f"{me_label(m)}: vs run {p['run_id']} ({_ct(p['started_at'])})"
+        if (p.get("se_case") or "") != (cases.get(m) or ""):
+            head += f"; SE case changed {p.get('se_case')} -> {cases.get(m)}, which alone can move every number"
+        lines += ["", head, "Days compared: " + fid._days(d["common_days"])]
+        cons = d["constraints"]
+        moved = cons[cons["change_pct"].abs() >= change_pct] if not cons.empty else cons
+        for _, r in moved.head(4).iterrows():
+            lines.append(f"  {con_label(r['official_constraint_id'])}: peak loading {r['old_peak_pct']:.0f}% -> "
+                         f"{r['new_peak_pct']:.0f}% ({r['change_pct']:+.0f})")
+        for _, r in cons[cons["change_pct"].isna()].head(3).iterrows():
+            lines.append(f"  {con_label(r['official_constraint_id'])}: "
+                         + ("new in this run" if pd.isna(r["old_peak_pct"]) else "no longer in the results"))
+        f = d["facilities"]
+        if not f.empty:
+            for _, r in f.head(outages_per_element).iterrows():
+                old_i = "" if pd.isna(r["old_impact_pct"]) else f"{r['old_impact_pct']:+.1f}%"
+                new_i = "" if pd.isna(r["new_impact_pct"]) else f"{r['new_impact_pct']:+.1f}%"
+                lines.append(f"  [{int(r['official_constraint_id'])}] {fac_label(r)}: {r['change']} "
+                             f"(impact {old_i or '-'} -> {new_i or '-'})")
+            if len(f) > outages_per_element:
+                lines.append(f"  ({len(f) - outages_per_element} more outage changes; call again with me_ids=[{m}] "
+                             f"and a larger outages_per_element.)")
+    first_looks = [c["me_id"] for c in changes if c["status"]]
+    if first_looks:
+        lines += ["", "Not compared (no earlier results): " + ", ".join(me_label(m) for m in first_looks)]
+    if no_output:
+        lines += ["", "Written by the run but no result file (or every row had a blank and was dropped, as on the "
+                  "page): " + ", ".join(me_label(m) for m in no_output)]
+    return "\n".join(lines + _warnings_section(warnings))
+
+
 @server.prompt()
 def binding_drivers(market: str, date: str = "") -> str:
     """Explain why the day's highest constraints bound, in the style of the desk's notes."""
@@ -1697,6 +2472,17 @@ def outage_briefing(market: str, date: str = "") -> str:
         template = template.split("-->", 1)[1].lstrip()
     return template.replace("{{market}}", market).replace("{{MARKET}}", market.upper()).replace("{{date}}", day)
 
+
+
+@server.prompt()
+def fid_review(market: str) -> str:
+    """Review the latest FID run: what changed since the previous run and the biggest upcoming risks."""
+    _check_choice("market", market, fid.FID_MARKETS)
+    with open(FID_REVIEW_PROMPT_PATH, "r") as f:
+        template = f.read()
+    if template.startswith("<!--"):
+        template = template.split("-->", 1)[1].lstrip()
+    return template.replace("{{market}}", market).replace("{{MARKET}}", market.upper())
 
 if __name__ == "__main__":
     threading.Thread(target=_preload_notes, name="preload-notes", daemon=True).start()

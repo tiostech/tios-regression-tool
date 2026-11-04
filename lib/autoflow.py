@@ -36,6 +36,7 @@ with data for fewer than 90% of the hours, as in tios-core. Both are reported th
 ``warn``.
 """
 
+import concurrent.futures
 import datetime
 import os
 import threading
@@ -115,6 +116,41 @@ def _utc_to_local_he(time_utc: pd.Series, tz) -> pd.DataFrame:
 
 # --- COEFFICIENTS ---
 
+# {market}_zonal_coefficients is indexed on (computed_at, official_constraint_id, ...), not on
+# the constraint, so "latest computed_at for these constraints" is a scan of the whole index:
+# 0.7s when MySQL has it in memory, up to 30s when it does not (MISO has 22M rows). The table
+# is refreshed daily, so a constraint with coefficients nearly always has some in the last
+# week; scanning that week newest first finds them in milliseconds. Only when it finds
+# nothing does the full scan run, which gives the same answer as before.
+RECENT_COEFFICIENT_DAYS = 7
+
+
+def _latest_coefficients(conn, market: str, constraint_ids) -> tuple[int | None, object]:
+    """(constraint ID, computed_at) of the most recent coefficients among these constraints."""
+    ids = sorted({int(c) for c in constraint_ids})
+    if not ids:
+        return None, None
+    params = {f"c{i}": c for i, c in enumerate(ids)}
+    placeholders = ", ".join(f":{k}" for k in params)
+    table = f"{market}_zonal_coefficients"
+    row = conn.execute(text(f"""
+        SELECT official_constraint_id, computed_at FROM {table} FORCE INDEX ({market}_zncoeff_dtconzontype)
+        WHERE computed_at >= NOW() - INTERVAL {RECENT_COEFFICIENT_DAYS} DAY
+          AND official_constraint_id IN ({placeholders})
+        ORDER BY computed_at DESC
+        LIMIT 1
+    """), params).fetchone()
+    if row is None:
+        row = conn.execute(text(f"""
+            SELECT official_constraint_id, MAX(computed_at) AS latest
+            FROM {table}
+            WHERE official_constraint_id IN ({placeholders})
+            GROUP BY official_constraint_id
+            ORDER BY latest DESC
+            LIMIT 1
+        """), params).fetchone()
+    return (row[0], row[1]) if row is not None else (None, None)
+
 def coefficient_constraint(engine, market: str, constraint_id: int, warn=_no_warn) -> tuple[int | None, object]:
     """(constraint ID whose coefficients to use, their computed_at).
 
@@ -124,9 +160,7 @@ def coefficient_constraint(engine, market: str, constraint_id: int, warn=_no_war
     """
     _check("market", market, osearch.MARKETS)
     with engine.connect() as conn:
-        latest = conn.execute(text(f"""
-            SELECT MAX(computed_at) FROM {market}_zonal_coefficients WHERE official_constraint_id = :c
-        """), {"c": constraint_id}).scalar()
+        _, latest = _latest_coefficients(conn, market, [constraint_id])
         if latest is not None:
             return constraint_id, latest
 
@@ -151,16 +185,8 @@ def coefficient_constraint(engine, market: str, constraint_id: int, warn=_no_war
         if not candidates:
             return None, None
 
-        cand_params = {f"c{i}": c for i, c in enumerate(sorted(candidates))}
-        row = conn.execute(text(f"""
-            SELECT official_constraint_id, MAX(computed_at) AS latest
-            FROM {market}_zonal_coefficients
-            WHERE official_constraint_id IN ({", ".join(f":{k}" for k in cand_params)})
-            GROUP BY official_constraint_id
-            ORDER BY latest DESC
-            LIMIT 1
-        """), cand_params).fetchone()
-    if row is None:
+        row = _latest_coefficients(conn, market, candidates)
+    if row[0] is None:
         return None, None
     warn(f"Constraint {constraint_id} has no zonal coefficients; using those of constraint {row[0]} "
          f"(same name: {', '.join(sorted(names))}), computed {row[1]}.")
@@ -290,16 +316,41 @@ def _read_cache_month(table: str, month: datetime.date) -> pd.DataFrame | None:
     return df
 
 
-def _pseudo_actual_values(table: str, zone_col: str, mw_col: str, zones, start_utc, end_utc,
-                          warn=_no_warn) -> pd.DataFrame:
-    """Pseudo actuals from the S3 cache as [time_utc, zone, mw]."""
+def _months(start_utc, end_utc) -> list[datetime.date]:
     months, m = [], datetime.date(start_utc.year, start_utc.month, 1)
     while m <= end_utc.date():
         months.append(m)
         m = (m + datetime.timedelta(days=32)).replace(day=1)
+    return months
 
+
+# An autoflow over a week reads one S3 file per (zone table, month), 20-30 of them; one after
+# another that took 7-8 seconds. They are fetched in parallel into the cache first.
+S3_PREFETCH_WORKERS = 8
+
+
+def _prefetch_cache_months(tables, start_utc, end_utc) -> None:
+    """Loads these tables' months into the cache in parallel. Failures are left for the
+    sequential read to retry and report, so the results and warnings are unchanged."""
+    wanted = [(t, mo) for t in dict.fromkeys(tables) for mo in _months(start_utc, end_utc)]
+    if len(wanted) < 2:
+        return
+
+    def load(item):
+        try:
+            _read_cache_month(*item)
+        except Exception:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=S3_PREFETCH_WORKERS) as pool:
+        list(pool.map(load, wanted))
+
+
+def _pseudo_actual_values(table: str, zone_col: str, mw_col: str, zones, start_utc, end_utc,
+                          warn=_no_warn) -> pd.DataFrame:
+    """Pseudo actuals from the S3 cache as [time_utc, zone, mw]."""
     frames = []
-    for month in months:
+    for month in _months(start_utc, end_utc):
         try:
             df = _read_cache_month(table, month)
         except Exception as e:  # credentials, network, permissions
@@ -357,6 +408,12 @@ def autoflow(engine, market: str, constraint_id: int, start_date: datetime.date,
     day_rows = pd.DataFrame({"dt": [start_date, end_date + datetime.timedelta(days=1)], "hr": [1, 1]})
     start_utc, end_utc = _local_he_to_utc(day_rows, market_tz)
     end_utc = end_utc - datetime.timedelta(hours=1)
+
+    if source != "forecast":
+        _prefetch_cache_months([zonal_table(iso, v, ct)[0] + "_snapshots"
+                                for ct, iso, v in coeffs[["coefficient_type", "iso", "vendor"]].drop_duplicates()
+                                .itertuples(index=False)
+                                if _table_exists(engine, _gate_table(iso, v, ct))], start_utc, end_utc)
 
     frames, skipped = [], []
     for (ctype, iso, row_vendor), group in coeffs.groupby(["coefficient_type", "iso", "vendor"]):
