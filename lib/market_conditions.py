@@ -91,16 +91,25 @@ def _walk(obj, path=""):
 def configs_as_of(engine, market: str, as_of: datetime.datetime) -> dict[str, dict]:
     """Every ``tios_configs`` entry for the market as it stood at ``as_of``: {name: parsed
     JSON}, using the newest version created by then (or the current one if none was)."""
+    # Pick the versions from the small columns first and fetch only their (large) config text:
+    # reading every version's text moved megabytes over the tunnel for a handful of configs.
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT name, config, created_at, current FROM tios_configs WHERE name LIKE :m ORDER BY name, created_at
+            SELECT id, name, created_at, current FROM tios_configs WHERE name LIKE :m ORDER BY name, created_at, id
         """), {"m": f"%.{market}"}).fetchall()
-    chosen = {}
-    for name, cfg, created, current in rows:
-        if created is not None and created <= as_of:
-            chosen[name] = cfg
-        elif name not in chosen and current:
-            chosen.setdefault(name, cfg)
+        chosen_ids = {}
+        for cid, name, created, current in rows:
+            if created is not None and created <= as_of:
+                chosen_ids[name] = cid
+            elif name not in chosen_ids and current:
+                chosen_ids.setdefault(name, cid)
+        texts = {}
+        if chosen_ids:
+            ids = list(chosen_ids.values())
+            placeholders = ", ".join(f":i{i}" for i in range(len(ids)))
+            texts = dict(conn.execute(text(f"SELECT id, config FROM tios_configs WHERE id IN ({placeholders})"),
+                                      {f"i{i}": v for i, v in enumerate(ids)}).fetchall())
+    chosen = {name: texts.get(cid) for name, cid in chosen_ids.items()}
     out = {}
     for name, cfg in chosen.items():
         try:

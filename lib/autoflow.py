@@ -115,6 +115,41 @@ def _utc_to_local_he(time_utc: pd.Series, tz) -> pd.DataFrame:
 
 # --- COEFFICIENTS ---
 
+# {market}_zonal_coefficients is indexed on (computed_at, official_constraint_id, ...), not on
+# the constraint, so "latest computed_at for these constraints" is a scan of the whole index:
+# 0.7s when MySQL has it in memory, up to 30s when it does not (MISO has 22M rows). The table
+# is refreshed daily, so a constraint with coefficients nearly always has some in the last
+# week; scanning that week newest first finds them in milliseconds. Only when it finds
+# nothing does the full scan run, which gives the same answer as before.
+RECENT_COEFFICIENT_DAYS = 7
+
+
+def _latest_coefficients(conn, market: str, constraint_ids) -> tuple[int | None, object]:
+    """(constraint ID, computed_at) of the most recent coefficients among these constraints."""
+    ids = sorted({int(c) for c in constraint_ids})
+    if not ids:
+        return None, None
+    params = {f"c{i}": c for i, c in enumerate(ids)}
+    placeholders = ", ".join(f":{k}" for k in params)
+    table = f"{market}_zonal_coefficients"
+    row = conn.execute(text(f"""
+        SELECT official_constraint_id, computed_at FROM {table} FORCE INDEX ({market}_zncoeff_dtconzontype)
+        WHERE computed_at >= NOW() - INTERVAL {RECENT_COEFFICIENT_DAYS} DAY
+          AND official_constraint_id IN ({placeholders})
+        ORDER BY computed_at DESC
+        LIMIT 1
+    """), params).fetchone()
+    if row is None:
+        row = conn.execute(text(f"""
+            SELECT official_constraint_id, MAX(computed_at) AS latest
+            FROM {table}
+            WHERE official_constraint_id IN ({placeholders})
+            GROUP BY official_constraint_id
+            ORDER BY latest DESC
+            LIMIT 1
+        """), params).fetchone()
+    return (row[0], row[1]) if row is not None else (None, None)
+
 def coefficient_constraint(engine, market: str, constraint_id: int, warn=_no_warn) -> tuple[int | None, object]:
     """(constraint ID whose coefficients to use, their computed_at).
 
@@ -124,9 +159,7 @@ def coefficient_constraint(engine, market: str, constraint_id: int, warn=_no_war
     """
     _check("market", market, osearch.MARKETS)
     with engine.connect() as conn:
-        latest = conn.execute(text(f"""
-            SELECT MAX(computed_at) FROM {market}_zonal_coefficients WHERE official_constraint_id = :c
-        """), {"c": constraint_id}).scalar()
+        _, latest = _latest_coefficients(conn, market, [constraint_id])
         if latest is not None:
             return constraint_id, latest
 
@@ -151,16 +184,8 @@ def coefficient_constraint(engine, market: str, constraint_id: int, warn=_no_war
         if not candidates:
             return None, None
 
-        cand_params = {f"c{i}": c for i, c in enumerate(sorted(candidates))}
-        row = conn.execute(text(f"""
-            SELECT official_constraint_id, MAX(computed_at) AS latest
-            FROM {market}_zonal_coefficients
-            WHERE official_constraint_id IN ({", ".join(f":{k}" for k in cand_params)})
-            GROUP BY official_constraint_id
-            ORDER BY latest DESC
-            LIMIT 1
-        """), cand_params).fetchone()
-    if row is None:
+        row = _latest_coefficients(conn, market, candidates)
+    if row[0] is None:
         return None, None
     warn(f"Constraint {constraint_id} has no zonal coefficients; using those of constraint {row[0]} "
          f"(same name: {', '.join(sorted(names))}), computed {row[1]}.")
