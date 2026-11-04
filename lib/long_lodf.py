@@ -216,62 +216,86 @@ def lodf_rows(engine, market: str, version: datetime.date, equipment_ids, reques
 
     eq_placeholders, params = _in("e", sorted({int(e) for e in equipment_ids}))
     params["v"] = version
-    queries = []
+
+    # EnergyCore joins the outage table into the LODF query. An equipment ID has hundreds of
+    # outage records (one per report), which multiplies every LODF row and made PJM searches
+    # take 40 seconds, so the LODF rows and the outage records are read separately and joined
+    # here. Same inner join, same rows.
+    lodf_where = [f"nm_out.outage_equipment_id IN ({eq_placeholders})"]
+    if threshold_min_lodf is not None:
+        lodf_where.append("ABS(lodf.lodf) >= :t_lodf")
+        params["t_lodf"] = threshold_min_lodf
+    if threshold_min_post_outage_flow_pct_of_limit is not None:
+        lodf_where.append("lodf.post_outage_limit_mw_pct >= :t_post")
+        params["t_post"] = threshold_min_post_outage_flow_pct_of_limit
+    if threshold_min_flow_delta_pct_of_limit is not None:
+        lodf_where.append(f"(lodf.line_limit_mw IS NOT NULL AND ABS({flow_increase}) >= :t_delta)")
+        params["t_delta"] = threshold_min_flow_delta_pct_of_limit
+    if threshold_min_flow_max_delta_pct_of_limit is not None:
+        lodf_where.append(f"ABS({flow_increase_max}) >= :t_maxdelta")
+        params["t_maxdelta"] = threshold_min_flow_max_delta_pct_of_limit
+    lodf_sql = f"""
+        SELECT nm_out.outage_equipment_id,
+               lodf.lodf, lodf.original_flow_mw, lodf.post_outage_flow_mw, lodf.line_limit_mw,
+               lodf.post_outage_limit_mw_pct, m_pwb.short_name AS mon_br_shortname,
+               o_pwb.short_name AS out_br_shortname, nm_me.official_monitored_element_id,
+               m_pwb.line_limit_mw AS monelem_line_limit_mw, o_pwb.line_limit_mw AS outage_line_limit_mw,
+               {flow_increase} AS flow_increase_pct_of_limit,
+               {flow_increase_max} AS flow_increase_max_pct_of_limit
+        FROM `{lodf_t}` lodf
+        INNER JOIN `{br_t}` m_pwb ON lodf.monitored_branch_id = m_pwb.branch_id
+        INNER JOIN `{nm_me}` nm_me ON nm_me.pw_from_bus_num = m_pwb.bus1_num AND nm_me.pw_to_bus_num = m_pwb.bus2_num
+               AND nm_me.pw_line_circuit = m_pwb.line_circuit AND nm_me.version_dt = :v AND nm_me.`defer` != 1
+        INNER JOIN `{br_t}` o_pwb ON lodf.outage_branch_id = o_pwb.branch_id
+        INNER JOIN `{nm_out}` nm_out ON nm_out.pw_from_bus_num = o_pwb.bus1_num AND nm_out.pw_to_bus_num = o_pwb.bus2_num
+               AND nm_out.pw_line_circuit = o_pwb.line_circuit AND nm_out.version_dt = :v AND nm_out.`defer` != 1
+        WHERE {" AND ".join(lodf_where)}
+    """
+
+    outage_frames = []
     modes = ["sched"] + (["active"] if include_active else [])
-    for mode in modes:
-        outage_t = f"{market}_transmission_outages" if mode == "sched" else f"{market}_active_outages"
-        where = [f"`{outage_t}`.outage_equipment_id IN ({eq_placeholders})"]
-        if mode == "sched" and apply_regression_ignore_rules:
-            rx = regression_exclusion_sql(engine, market, outage_t, params)
-            if rx:
-                where.append(f"({rx})")
-        if request_ids:
-            rq, rq_params = _in(f"r{mode}", request_ids)
-            params.update(rq_params)
-            where.append(f"`{outage_t}`.outage_request_id IN ({rq})")
-        if threshold_min_lodf is not None:
-            where.append("ABS(lodf.lodf) >= :t_lodf")
-            params["t_lodf"] = threshold_min_lodf
-        if threshold_min_post_outage_flow_pct_of_limit is not None:
-            where.append("lodf.post_outage_limit_mw_pct >= :t_post")
-            params["t_post"] = threshold_min_post_outage_flow_pct_of_limit
-        if threshold_min_flow_delta_pct_of_limit is not None:
-            where.append(f"(lodf.line_limit_mw IS NOT NULL AND ABS({flow_increase}) >= :t_delta)")
-            params["t_delta"] = threshold_min_flow_delta_pct_of_limit
-        if threshold_min_flow_max_delta_pct_of_limit is not None:
-            where.append(f"ABS({flow_increase_max}) >= :t_maxdelta")
-            params["t_maxdelta"] = threshold_min_flow_max_delta_pct_of_limit
-        sched = mode == "sched"
-        queries.append(f"""
-            SELECT `{outage_t}`.outage_equipment_id, `{outage_t}`.outage_request_id,
-                   `{outage_t}`.outage_equipment_identifier,
-                   {f"`{outage_t}`.request_status" if sched else "NULL"} AS request_status,
-                   `{outage_t}`.actual_start, `{outage_t}`.actual_end,
-                   {f"`{outage_t}`.planned_start" if sched else "NULL"} AS planned_start,
-                   {f"`{outage_t}`.planned_end" if sched else "NULL"} AS planned_end,
-                   lodf.lodf, lodf.original_flow_mw, lodf.post_outage_flow_mw, lodf.line_limit_mw,
-                   lodf.post_outage_limit_mw_pct, m_pwb.short_name AS mon_br_shortname,
-                   o_pwb.short_name AS out_br_shortname, nm_me.official_monitored_element_id,
-                   m_pwb.line_limit_mw AS monelem_line_limit_mw, o_pwb.line_limit_mw AS outage_line_limit_mw,
-                   {flow_increase} AS flow_increase_pct_of_limit,
-                   {flow_increase_max} AS flow_increase_max_pct_of_limit,
-                   '{mode}' AS outage_source
-            FROM `{lodf_t}` lodf
-            INNER JOIN `{br_t}` m_pwb ON lodf.monitored_branch_id = m_pwb.branch_id
-            INNER JOIN `{nm_me}` nm_me ON nm_me.pw_from_bus_num = m_pwb.bus1_num AND nm_me.pw_to_bus_num = m_pwb.bus2_num
-                   AND nm_me.pw_line_circuit = m_pwb.line_circuit AND nm_me.version_dt = :v AND nm_me.`defer` != 1
-            INNER JOIN `{br_t}` o_pwb ON lodf.outage_branch_id = o_pwb.branch_id
-            INNER JOIN `{nm_out}` nm_out ON nm_out.pw_from_bus_num = o_pwb.bus1_num AND nm_out.pw_to_bus_num = o_pwb.bus2_num
-                   AND nm_out.pw_line_circuit = o_pwb.line_circuit AND nm_out.version_dt = :v AND nm_out.`defer` != 1
-            INNER JOIN `{outage_t}` ON `{outage_t}`.outage_equipment_id = nm_out.outage_equipment_id
-            WHERE {" AND ".join(where)}
-        """)
-    sql = queries[0] if len(queries) == 1 else "SELECT * FROM (" + " UNION ".join(f"({q})" for q in queries) + ") lodfs_combined"
-    # EnergyCore's order; ties (several elements on one branch) are left to MySQL there, so
-    # element ID is added to make the order repeatable.
-    sql += " ORDER BY ROUND(flow_increase_pct_of_limit) DESC, lodf DESC, outage_source DESC, official_monitored_element_id"
     with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn, params=params)
+        lodfs = pd.read_sql(text(lodf_sql), conn, params=params)
+        for mode in modes:
+            outage_t = f"{market}_transmission_outages" if mode == "sched" else f"{market}_active_outages"
+            o_params = {k: v for k, v in params.items() if k.startswith("e")}
+            where = [f"`{outage_t}`.outage_equipment_id IN ({eq_placeholders})"]
+            if mode == "sched" and apply_regression_ignore_rules:
+                rx = regression_exclusion_sql(engine, market, outage_t, o_params)
+                if rx:
+                    where.append(f"({rx})")
+            if request_ids:
+                rq, rq_params = _in(f"r{mode}", request_ids)
+                o_params.update(rq_params)
+                where.append(f"`{outage_t}`.outage_request_id IN ({rq})")
+            sched = mode == "sched"
+            outage_frames.append(pd.read_sql(text(f"""
+                SELECT `{outage_t}`.outage_equipment_id, `{outage_t}`.outage_request_id,
+                       `{outage_t}`.outage_equipment_identifier,
+                       {f"`{outage_t}`.request_status" if sched else "NULL"} AS request_status,
+                       `{outage_t}`.actual_start, `{outage_t}`.actual_end,
+                       {f"`{outage_t}`.planned_start" if sched else "NULL"} AS planned_start,
+                       {f"`{outage_t}`.planned_end" if sched else "NULL"} AS planned_end,
+                       '{mode}' AS outage_source
+                FROM `{outage_t}`
+                WHERE {" AND ".join(where)}
+            """), conn, params=o_params))
+    nonempty = [f for f in outage_frames if not f.empty]
+    outages = pd.concat(nonempty, ignore_index=True) if len(nonempty) > 1 else (nonempty or outage_frames)[0]
+    df = outages.merge(lodfs, on="outage_equipment_id", how="inner")
+    if len(outage_frames) > 1:
+        df = df.drop_duplicates()  # EnergyCore UNIONs the scheduled and active queries, which drops identical rows.
+    cols = ["outage_equipment_id", "outage_request_id", "outage_equipment_identifier", "request_status", "actual_start",
+            "actual_end", "planned_start", "planned_end"] + [c for c in lodfs.columns if c != "outage_equipment_id"] \
+        + ["outage_source"]
+    df = df[cols]
+    # EnergyCore's order: ROUND(flow_increase_pct_of_limit) DESC, lodf DESC, outage_source DESC
+    # (MySQL rounds half away from zero, NULLs last in DESC). Element ID makes ties repeatable.
+    fi = df["flow_increase_pct_of_limit"].astype(float)
+    df = df.assign(_r=np.sign(fi) * np.floor(fi.abs() + 0.5))
+    df = df.sort_values(["_r", "lodf", "outage_source", "official_monitored_element_id"],
+                        ascending=[False, False, False, True], na_position="last", kind="mergesort")
+    df = df.drop(columns="_r").reset_index(drop=True)
     for c in ("outage_equipment_id", "official_monitored_element_id"):
         df[c] = df[c].astype("Int64")
     return df

@@ -12,7 +12,7 @@ stage_bundle() {
   cp "$src/.python-version" "$src/mcp_server.py" "$stage/"
   mkdir -p "$stage/lib" "$stage/prompts"
   cp "$src"/lib/*.py "$stage/lib/"
-  cp "$src/prompts/outage_briefing.md" "$src/prompts/binding_drivers.md" "$stage/prompts/"
+  cp "$src/prompts/outage_briefing.md" "$src/prompts/binding_drivers.md" "$src/prompts/fid_review.md" "$stage/prompts/"
 
   # Pin the dependency versions inside the bundle so every install gets the same set.
   if command -v uv >/dev/null 2>&1; then

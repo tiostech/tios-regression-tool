@@ -159,6 +159,9 @@ counts against your assistant subscription, not a separate API bill.
 | `list_flagged_outages` | Every transmission outage the desk flagged over a date range (default: red flags, alert and auto_alert, out today or later), with flag notes, who flagged it, requests, and groups. |
 | `get_generator_outages` | IIR generator outages and derates active in a date range, by plant/unit/owner name, IDs, fuel, outage type, or MW, with each outage's revision history on request. |
 | `get_sced_shadow_prices` | ERCOT SCED-run shadow prices, line flows, and limits: the top constraints over a range, or one constraint's runs by run, hour, or day. |
+| `get_long_lodf_search` | EnergyCore's Long-LODF search for an outage or group: the monitored elements it loads (LODF, flows, delta, max delta) and their RT shadow totals while it was out, filtered by the market's saved preset unless told otherwise. |
+| `list_fid_runs` | Recent FID assessment runs for a market, their status, and which elements the latest run added or dropped. |
+| `get_fid_changes` | The latest FID run's biggest upcoming risks (post-outage loading vs. rating and the outages driving it) and what changed since the previous run. Reads the results from S3, so it needs AWS read access to `tios-fid-production`. |
 | `binding_drivers` (prompt) | Instructions for explaining why the day's highest constraints bound. They live in `prompts/binding_drivers.md`. |
 
 ### Setup (once)

@@ -70,7 +70,10 @@
     {"name": "get_constraint_factors", "description": "A constraint's promoted shift factors: most positive and most negative pnodes, and the factor source."},
     {"name": "list_flagged_outages", "description": "Every outage the desk flagged (red = alert/auto_alert, watch, safe) over a date range, with the flag notes."},
     {"name": "get_generator_outages", "description": "IIR generator outages and derates, current or historical, by plant, unit, fuel, or MW, with revision history."},
-    {"name": "get_sced_shadow_prices", "description": "ERCOT shadow prices, flows, and limits from each SCED run, by run, hour, or day."}
+    {"name": "get_sced_shadow_prices", "description": "ERCOT shadow prices, flows, and limits from each SCED run, by run, hour, or day."},
+    {"name": "get_long_lodf_search", "description": "EnergyCore's Long-LODF search for an outage: elements it loads, with RT shadow totals, using the market's preset."},
+    {"name": "list_fid_runs", "description": "Recent FID assessment runs and how the latest run's element list changed."},
+    {"name": "get_fid_changes", "description": "The latest FID run's biggest upcoming risks and what changed since the previous run (needs AWS read access to the FID bucket)."}
   ],
   "tools_generated": false,
   "prompts_generated": true,
