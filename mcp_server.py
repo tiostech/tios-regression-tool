@@ -38,6 +38,7 @@ from lib import long_lodf
 from lib import market_conditions
 from lib import monitored_elements
 from lib import network
+from lib import notes_cache
 from lib import outage_impacts
 from lib import outage_groups
 from lib import outage_search as osearch
@@ -50,8 +51,10 @@ BRIEFING_PROMPT_PATH = os.path.join(_REPO_ROOT, "prompts", "outage_briefing.md")
 DRIVERS_PROMPT_PATH = os.path.join(_REPO_ROOT, "prompts", "binding_drivers.md")
 FID_REVIEW_PROMPT_PATH = os.path.join(_REPO_ROOT, "prompts", "fid_review.md")
 
-# Same lifetime as the page's notes cache.
+# Same lifetime as the page's notes cache (still used for the element link graph).
 NOTES_CACHE_SECONDS = 4 * 60 * 60
+# How often a market's notes are brought up to date; each update reads only changed notes.
+NOTES_REFRESH_SECONDS = 5 * 60
 # Same cap as the page's main search.
 NOTE_RESULT_LIMIT = 2000
 
@@ -101,6 +104,7 @@ server = MCPServer(
 
 _engine = None
 _notes_cache = {}
+_notes_stores = {}
 _notes_locks = {m: threading.Lock() for m in osearch.MARKETS}
 _link_graph_cache = None
 
@@ -113,12 +117,15 @@ def engine():
 
 
 def market_notes(market: str) -> pd.DataFrame:
-    """All quick notes for a market, reloaded after NOTES_CACHE_SECONDS. A load takes 20 seconds
-    or more; a call that arrives during one waits for it instead of starting another."""
+    """All quick notes for a market, the same frame as osearch.load_market_notes. Kept on disk
+    between sessions and brought up to date at most every NOTES_REFRESH_SECONDS with only the
+    notes that changed (lib/notes_cache.py). A call that arrives during a refresh waits for it
+    instead of starting another."""
     with _notes_locks[market]:
         loaded = _notes_cache.get(market)
-        if loaded is None or time.time() - loaded[0] > NOTES_CACHE_SECONDS:
-            loaded = (time.time(), osearch.load_market_notes(engine(), market))
+        if loaded is None or time.time() - loaded[0] > NOTES_REFRESH_SECONDS:
+            store = _notes_stores.setdefault(market, notes_cache.MarketNotes(engine(), market))
+            loaded = (time.time(), store.refresh())
             _notes_cache[market] = loaded
         return loaded[1]
 
