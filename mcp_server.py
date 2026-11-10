@@ -250,8 +250,9 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
 
     Returns tab-separated rows. note_matches counts notes naming the equipment ID;
     group_note_matches counts notes naming any of its groups. MISO notes usually name an
-    outage by group (GID), so for an outage with group_note_matches, call
-    get_outage_documentation with id_type="group" and each of its group_ids. Outages with
+    outage by group (GID); get_outage_documentation with a MISO equipment ID also searches its
+    groups. In other markets, for an outage with group_note_matches, call it with
+    include_groups=True. Outages with
     note_matches, group_note_matches, annotations, and flag all empty have no history, so
     get_outage_documentation would return nothing useful for them.
     """
@@ -324,22 +325,24 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
 @_readable_errors
 def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipment",
                              notes_market: str | None = None, lookback: str = "3 Years", context: str = "All",
-                             max_notes_per_element: int = 25) -> str:
+                             max_notes_per_element: int = 25, include_groups: bool | None = None) -> str:
     """Documentation for one outage: the same text as "Copy Full Output to Clipboard" on the
     Outage & Shadow Price Search page.
 
     It has the match fields, flag notes, outage annotations, quick notes that mention the
-    outage (with summed shadow prices), and monitored element descriptions.
+    outage (with summed shadow prices), and monitored element descriptions. The first line
+    says exactly what was searched (equipment IDs and groups).
 
     MISO desk notes usually name an outage by its group ("GID 2972"), not its equipment ID,
-    so an equipment search often finds no notes for an outage that has plenty. For an outage
-    with group IDs (list_upcoming_outages gives them, with group_note_matches), search by
-    group: one call per group ID. A group search also finds the notes naming the group's
-    member equipment.
+    so a MISO equipment search also searches every group the equipment belongs to, in one
+    combined search: each note, flag note and annotation appears once. A group search also
+    finds the notes naming the group's member equipment. In other markets, pass
+    include_groups=True (or id_type="group" with the group IDs) to do the same.
 
     Args:
         market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
-        outage_id: One equipment ID, one group ID, or search text, depending on id_type.
+        outage_id: Equipment IDs or group IDs (comma-separated for several, searched together),
+            or search text, depending on id_type.
         id_type: equipment, group, or text (comma-separated search terms).
         notes_market: Market whose notes and shadow prices to search, when different from the
             outage market (for example MISO outages in SPP or PJM notes). Default: market.
@@ -347,6 +350,8 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
         context: All, rt_shadow, rt_shadow_forecast, or da_shadow.
         max_notes_per_element: Most quick notes to show for each monitored element (newest
             first), to keep the output a manageable size. 0 shows all of them.
+        include_groups: For id_type equipment, also search the equipment's outage groups.
+            Default: true for MISO, false for other markets.
     """
     _check_choice("market", market, osearch.MARKETS)
     notes_market = notes_market or market
@@ -358,14 +363,42 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     eng = engine()
     warnings = []
     search_type = ID_TYPES[id_type]
+    if include_groups is None:
+        include_groups = market == "miso"
 
-    search_fields, raw_eq_ids, _ = osearch.build_search_fields(eng, search_type, outage_id, notes_market, market,
-                                                               warn=warnings.append)
+    if id_type == "text":
+        searches = [(search_type, outage_id)]
+        searched = None
+    else:
+        ids = list(dict.fromkeys(osearch.clean_id(i) for i in outage_id.split(",")))
+        ids = [i for i in ids if i]
+        if not ids:
+            raise ValueError(f"No {id_type} ID found in {outage_id!r}.")
+        group_ids = ids if id_type == "group" else []
+        if id_type == "equipment" and include_groups:
+            probe = [{"outage_equipment_id": i} for i in ids]
+            upcoming_outages.add_group_ids(eng, market, probe, warn=warnings.append)
+            group_ids = list(dict.fromkeys(g for o in probe for g in o["group_ids"]))
+        searches = ([(search_type, i) for i in ids] if id_type == "equipment" else []) + \
+                   [("Group ID", g) for g in group_ids]
+        searched = _searched_line(market, id_type, ids, group_ids, include_groups)
+
+    search_fields, raw_eq_ids, outage_names = [], [], []
+    for s_type, s_id in searches:
+        fields, eq_ids, _ = osearch.build_search_fields(eng, s_type, s_id, notes_market, market,
+                                                        warn=warnings.append)
+        search_fields += fields
+        raw_eq_ids += eq_ids
+        if s_type == search_type:
+            outage_names += osearch.fetch_outage_names(eng, s_type, s_id, market, eq_ids, warn=warnings.append)
+    search_fields = list(dict.fromkeys(search_fields))
+    raw_eq_ids = list(dict.fromkeys(raw_eq_ids))
+    outage_names = list(dict.fromkeys(outage_names))
     if not search_fields:
-        return "\n".join(["No search fields could be built from that input, so there is nothing to search for."]
+        return "\n".join(([searched] if searched else [])
+                         + ["No search fields could be built from that input, so there is nothing to search for."]
                          + _warnings_section(warnings))
 
-    outage_names = osearch.fetch_outage_names(eng, search_type, outage_id, market, raw_eq_ids, warn=warnings.append)
     annotations = osearch.fetch_outage_annotations(eng, raw_eq_ids, market, notes_market, warn=warnings.append)
     flag_notes = osearch.dedupe_flag_notes(
         osearch.fetch_transmission_outage_flags(eng, notes_market, raw_eq_ids, warn=warnings.append,
@@ -387,7 +420,7 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     if max_notes_per_element and not df.empty:
         df_shown = df.groupby('official_monitored_element_id', sort=False).head(max_notes_per_element)
 
-    lines = []
+    lines = [searched] if searched else []
     if raw_eq_ids:
         lines.append("EnergyCore outage search: " + ", ".join(links.md(e, links.outage(market, e)) for e in raw_eq_ids))
     lines.append(osearch.clipboard_text(notes_market, search_fields, outage_names, flag_notes, me_groups, df_shown,
@@ -399,6 +432,21 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
         lines.append(f"(More than {NOTE_RESULT_LIMIT} notes matched; only the newest {NOTE_RESULT_LIMIT} were used.)")
 
     return "\n".join(lines + _warnings_section(warnings))
+
+
+def _searched_line(market: str, id_type: str, ids: list[str], group_ids: list[str], include_groups: bool) -> str:
+    """Names exactly what get_outage_documentation searched, so an empty result is unambiguous."""
+    def group(g):
+        return links.md(f"GID {g}", links.outage_group(market, g)) if market == "miso" else f"group {g}"
+    groups = ", ".join(group(g) for g in group_ids)
+    if id_type == "group":
+        return f"Searched: {groups} (with their associated groups and member equipment)"
+    eq = ", ".join(links.md(e, links.outage(market, e)) for e in ids)
+    if not include_groups:
+        return f"Searched: equipment {eq} (its groups not included)"
+    if not group_ids:
+        return f"Searched: equipment {eq}; no outage groups"
+    return f"Searched: equipment {eq} and its groups {groups} (with their associated groups and member equipment)"
 
 
 def _tsv(df: pd.DataFrame, columns: list[str], decimals: int = 0) -> list[str]:

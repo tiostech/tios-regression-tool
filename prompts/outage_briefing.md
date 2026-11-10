@@ -18,8 +18,9 @@ Write the Transmission Outage Analysis report below for every {{MARKET}} transmi
 
 1. Call `list_upcoming_outages` with market `{{market}}` and date `{{date}}`.
 2. For each outage with note matches, group note matches, annotations, or a flag, call `get_outage_documentation` with market `{{market}}`. Do not call it for outages with no history.
-   - If the outage has group note matches, call it with `id_type` `group`, once for each of its group IDs. Desk notes usually name an outage by group, and a group search also finds the notes that name its equipment.
-   - Otherwise call it with its equipment ID.
+   - Call it once with the outage's equipment ID. For MISO this also searches every group the outage belongs to, since MISO notes usually name an outage by group ("GID 2972").
+   - In other markets, if the outage has group note matches, add `include_groups` set to true, so the same call also searches its groups.
+   - If a result has no notes, say exactly what was searched, using its "Searched:" line (for example "equipment 60052271 and its groups GID 1186, GID 7744: no notes").
    - If the result says notes were omitted and the older history matters for the RECENCY rule, call it again with `max_notes_per_element` set to 0.
    - If the result ends with WARNINGS, some data did not load. Say so in that outage's report.
 3. Write one report per documented outage, using the Output_Format below. The "current market" is {{MARKET}}. Put the outages in order: the outage with the strongest CONSIDER FORECASTING case first.
