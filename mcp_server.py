@@ -38,6 +38,7 @@ from lib import long_lodf
 from lib import market_conditions
 from lib import monitored_elements
 from lib import network
+from lib import nodal_prices
 from lib import notes_cache
 from lib import outage_impacts
 from lib import outage_groups
@@ -90,6 +91,7 @@ server = MCPServer(
         "get_outage_group gives an outage's groups and every group member; get_outage_quicklinks gives the "
         "monitored elements the desk quicklinked to an outage or group (in any market), and "
         "get_monitored_element_notes gives all desk notes on elements over a date range. "
+        "get_nodal_prices gives nodal DA, RT and forecast LMPs with energy, congestion and loss. "
         "get_constraint_factors gives a constraint's promoted shift factors: the most positive and most "
         "negative pnodes. list_flagged_outages lists every outage the desk flagged (red = alert/auto_alert) "
         "over a date range; get_generator_outages gives IIR generator outages and derates, current or "
@@ -453,7 +455,7 @@ def _searched_line(market: str, id_type: str, ids: list[str], group_ids: list[st
 def _tsv(df: pd.DataFrame, columns: list[str], decimals: int = 0) -> list[str]:
     """Tab-separated header and rows; floats rounded, NaN shown as empty."""
     def cell(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
+        if v is None or v is pd.NA or (isinstance(v, float) and pd.isna(v)):
             return ""
         if isinstance(v, float):
             return f"{v:.{decimals}f}"
@@ -1088,6 +1090,101 @@ def _autoflow_section(eng, market: str, constraint_id: int, day: datetime.date, 
                 lines += _tsv(changes, ["coefficient_type", "iso", "zone", "coefficient", "base_mw", "compare_mw",
                                         "d_leverage"], decimals=1)
     return lines
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = None, end_date: str | None = None,
+                     show: list[str] | None = None, granularity: str = "hour", max_rows: int = 400) -> str:
+    """Nodal LMPs for pnodes over a date range: actual DA and RT LMP with energy, congestion and
+    loss, and our forecast (FC) LMP, hour by hour or as daily averages.
+
+    Actuals are EnergyCore's hourly LMPs. DA is available through tomorrow once it publishes;
+    today's RT hours are preliminary (rt_prelim = 1) until settled. Hours are hour ending 1-24 in
+    market time (MISO is fixed EST). Energy = LMP - congestion - loss. ERCOT has no loss
+    component, and its congestion is derived (LMP minus average energy).
+
+    The FC LMP is built the way EnergyCore's bids build it: DA energy forecast + shadow-based RT
+    congestion forecast (fc_cong) + RT loss factor forecast x energy forecast (fc_loss).
+    fc_cong_default is the congestion forecast without the desk's shadow price forecasts.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        nodes: Pnode names (e.g. "INDIANA.HUB", "51288-WESTERNHUB", "HB_NORTH"), market pnode
+            identifiers, or official pnode IDs. A unique part of a name also works.
+        start_date: First day, YYYY-MM-DD. Default: yesterday.
+        end_date: Last day, YYYY-MM-DD. Default: start_date, or tomorrow when start_date is not
+            given. At most 366 days.
+        show: Any of da, rt, fc. Default all three.
+        granularity: hour, or day (averages over the hours present).
+        max_rows: Most rows to list per node (oldest first). 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("granularity", granularity, ("hour", "day"))
+    show = [x.lower() for x in (show or ["da", "rt", "fc"])]
+    for x in show:
+        _check_choice("show", x, ("da", "rt", "fc"))
+    if not nodes:
+        raise ValueError("Give at least one node.")
+    today = datetime.date.today()
+    start = datetime.date.fromisoformat(start_date) if start_date else today - datetime.timedelta(days=1)
+    end = (datetime.date.fromisoformat(end_date) if end_date
+           else start if start_date else today + datetime.timedelta(days=1))
+    if end < start:
+        raise ValueError("end_date is before start_date.")
+    if (end - start).days >= nodal_prices.MAX_DAYS:
+        raise ValueError(f"At most {nodal_prices.MAX_DAYS} days per call.")
+
+    eng = engine()
+    pnodes, messages = nodal_prices.resolve_nodes(eng, market, nodes)
+    lines = [f"Market: {market.upper()}", f"Days: {start} to {end}"] + messages
+    if pnodes.empty:
+        return "\n".join(lines)
+    ids = [int(i) for i in pnodes["id"]]
+    keys = ["dt", "hr", "official_pnode_id"]
+    df = pd.DataFrame(columns=keys)
+    if "da" in show or "rt" in show:
+        df = nodal_prices.actuals(eng, market, ids, start, end, today)
+    if "fc" in show:
+        fc = nodal_prices.forecasts(eng, market, ids, start, end)
+        if not fc.empty:
+            df = fc if df.empty else df.merge(fc, on=keys, how="outer")
+
+    columns = {"da": ["da_lmp", "da_energy", "da_congestion", "da_loss"],
+               "rt": ["rt_lmp", "rt_energy", "rt_congestion", "rt_loss", "rt_preliminary"],
+               "fc": ["fc_lmp", "fc_energy", "fc_congestion", "fc_loss", "fc_congestion_default"]}
+    short = {"da_congestion": "da_cong", "rt_congestion": "rt_cong", "fc_congestion": "fc_cong",
+             "fc_congestion_default": "fc_cong_default", "rt_preliminary": "rt_prelim"}
+    wanted = [c for k in show for c in columns[k] if c in df.columns]
+    for p in pnodes.itertuples():
+        rows = df[df["official_pnode_id"] == p.id].sort_values(["dt", "hr"]) if not df.empty else df
+        rows = rows.dropna(subset=[c for c in wanted if c != "rt_preliminary"], how="all")
+        if "rt_preliminary" in rows.columns:
+            rows = rows.assign(rt_preliminary=rows["rt_preliminary"].astype("Int64"))
+        retired = f", retired {p.deleted_at:%Y-%m-%d}" if pd.notna(p.deleted_at) else ""
+        lines += ["", f"=== {p.name} (pnode {p.id}, identifier {p.market_pnode_identifier}, "
+                      f"{p.node_type or 'type unknown'}{retired}) ==="]
+        missing = [k.upper() for k in show
+                   if f"{k}_congestion" not in rows.columns or rows[f"{k}_congestion"].isna().all()]
+        if missing:
+            lines.append(f"No {', '.join(missing)} prices for this node in this range"
+                         + (" (EnergyCore has no congestion forecast for it)." if "FC" in missing else "."))
+        if rows.empty:
+            continue
+        if granularity == "day":
+            rows = rows.groupby("dt", as_index=False).agg(
+                hours=("hr", "count"), **{c: (c, "max" if c == "rt_preliminary" else "mean") for c in wanted})
+            cols = ["dt", "hours"] + wanted
+        else:
+            cols = ["dt", "hr"] + wanted
+        total = len(rows)
+        if max_rows and total > max_rows:
+            rows = rows.head(max_rows)
+            lines.append(f"(Showing the first {max_rows} of {total} rows; narrow the dates, use granularity=day, "
+                         "or pass max_rows=0.)")
+        table = _tsv(rows.rename(columns=short), [short.get(c, c) for c in cols], decimals=2)
+        lines += table
+    return "\n".join(lines)
 
 
 @server.tool(annotations=READ_ONLY)
