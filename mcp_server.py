@@ -79,6 +79,7 @@ server = MCPServer(
         "with complete data. get_market_conditions gives energy prices, RTEP, and the stress index; "
         "get_autoflow gives autoflow over a date range; get_shadow_forecasts gives the desk's RT shadow price "
         "forecasts for a day, get_forecast_model shows the models and features behind a constraint's forecast, "
+        "list_model_groups lists a forecast day's model groups (T+2 too, before they are applied), "
         "and get_forecast_accuracy scores the forecasts against actuals over a date range; "
         "get_outage_impacts checks outages (including planned ones on future days) against a constraint or "
         "monitored element, or one monitored element/outage pair with outage_id. "
@@ -794,6 +795,7 @@ def get_forecast_model(market: str, constraint_id: int, date: str | None = None,
     lines.append(f"The weights imply {total:.0f} for constraint {cid}; the forecast table has {table_total:.0f} "
                  f"(manual {shadow['manual_fc'].sum():.0f}, default {shadow['default_fc'].sum():.0f})."
                  + ("" if abs(total - table_total) <= max(5, 0.05 * table_total) else
+                    " They differ: this is an early (T+2) group, not applied until the next day." if group["early"] else
                     " They differ, so the forecast was edited after the models ran, or the group was not applied."))
 
     models["total_for_constraint"] = [None if (h := forecast_models.hourly_output(o, cid)) is None else h.sum()
@@ -881,6 +883,49 @@ def get_forecast_model(market: str, constraint_id: int, date: str | None = None,
            ["default_fc", "manual_fc", "forecast"] + (["actual"] if has_actuals else [])
     lines += _tsv(hourly, cols, decimals=1)
     return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def list_model_groups(market: str, date: str | None = None, days_ahead: int = 2, states: list[str] | None = None,
+                      name: str | None = None, constraint_ids: list[int] | None = None, max_groups: int = 100) -> str:
+    """The regression model groups for one forecast day, as on EnergyCore's model groups page,
+    largest estimated forecast first. Works for T+2: those groups are built early (state
+    early_finished) and are not applied until the next day, so they have no forecast-table
+    values yet.
+
+    Each row has the group's state, mode, estimated forecast, model count, and the constraints
+    it allocates its forecast to. Use get_forecast_model with one of those constraints for the
+    models and features.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        date: The forecast day, YYYY-MM-DD.
+        days_ahead: Days from today when date is not given (2 = T+2, the default).
+        states: Only these group states, for example ["early_finished"] or ["applied",
+            "auto_applied"]. Others: applied_unlocked, auto_not_applied, finished, failed.
+        name: Text to find in the group name.
+        constraint_ids: Only groups whose models cover one of these constraints.
+        max_groups: Most groups to list. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    day = _resolve_date(date, days_ahead)
+    eng = engine()
+    df = forecast_models.list_groups(eng, market, day, states=states, name=name, constraint_ids=constraint_ids)
+    lines = [f"Market: {market.upper()}", f"Forecast day: {day}"]
+    if df.empty:
+        return "\n".join(lines + ["", "No model groups match."])
+    lines.append("Groups: " + str(len(df)) + "; by state: "
+                 + ", ".join(f"{k} {v}" for k, v in df["group_state"].value_counts().items()))
+    shown = df if not max_groups else df.head(max_groups)
+    if len(shown) < len(df):
+        lines.append(f"(Showing the {len(shown)} with the largest estimated forecast; pass max_groups=0 for all.)")
+    lines += ["", "\t".join(["group", "state", "mode", "est_forecast", "models", "constraints (allocation)"])]
+    for g in shown.itertuples():
+        alloc = ", ".join(f"{c} {float(p):.0%}" for c, p in (g.constraint_allocation or {}).items())
+        lines.append("\t".join([links.md(f"{g.id} {g.name}", links.model_group(market, g.id)), g.group_state,
+                                g.mode or "", f"{g.estimated_proposed_forecast or 0:.0f}", str(g.models), alloc]))
+    return "\n".join(lines)
 
 
 @server.tool(annotations=READ_ONLY)
