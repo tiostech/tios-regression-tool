@@ -23,6 +23,7 @@ Write the Transmission Outage Analysis report below for every {{MARKET}} transmi
    - If a result has no notes, say exactly what was searched, using its "Searched:" line (for example "equipment 60052271 and its groups GID 1186, GID 7744: no notes").
    - If the result says notes were omitted and the older history matters for the RECENCY rule, call it again with `max_notes_per_element` set to 0.
    - If the result ends with WARNINGS, some data did not load. Say so in that outage's report.
+   - Also call `get_outage_history` with market `{{market}}` and the outage's equipment ID, for a "last time out" recap. Its "Last time out" line is the newest completed or in-progress instance from either table (never a planned one). Compare what happened then (actual start and end against planned, early or late return, active-table spells with no matching request) with the flag note, which is written when the outage is vetted and rarely updated. Under the outage's heading, add a line `- Last time out: [dates and what the history adds to the flag note, or "consistent with the flag note"]`.
 3. Write one report per documented outage, using the Output_Format below. The "current market" is {{MARKET}}. Put the outages in order: the outage with the strongest CONSIDER FORECASTING case first.
 4. End with a section `# NO HISTORY #` that lists the outages you did not document, one line each: equipment ID and outage name.
 

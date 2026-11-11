@@ -42,6 +42,7 @@ from lib import nodal_prices
 from lib import notes_cache
 from lib import outage_impacts
 from lib import outage_groups
+from lib import outage_history
 from lib import outage_search as osearch
 from lib import sced
 from lib import shadow_forecasts
@@ -88,6 +89,8 @@ server = MCPServer(
         "EnergyCore pages; keep those links when you mention them in your answer. get_monitored_element gives an "
         "element's description and the elements it is linked to, often the same line in another market under a "
         "different name; check it before saying a constraint is not shared with another market. "
+        "get_outage_history lists every time an outage (or its group) was out, from both the active and "
+        "transmission tables, for a last-time-out recap. "
         "get_outage_group gives an outage's groups and every group member; get_outage_quicklinks gives the "
         "monitored elements the desk quicklinked to an outage or group (in any market), and "
         "get_monitored_element_notes gives all desk notes on elements over a date range. "
@@ -1587,6 +1590,129 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
 
     return "\n".join(lines + _warnings_section(warnings))
 
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_outage_history(market: str, outage_id: str, id_type: str = "equipment", table: str = "comb",
+                       include_groups: bool = True, start_date: str | None = None, end_date: str | None = None,
+                       apply_regression_ignore_rules: bool = True, include_planned: bool = True,
+                       max_rows: int = 50, max_note_chars: int = 400) -> str:
+    """Every time an outage was out of service, newest first: one row per record from each of
+    the ISO's two outage tables, with actual and planned times, status, and desk flags. Use it
+    for a "last time out" recap: what the outage did the last time, compared with its flag note.
+
+    - act (active table): the ISO's real-time list of what is out. One row per out-of-service
+      spell, with actual start and end. The desk generally trusts these actuals most. Outages
+      are often only in this table (forced outages, unscheduled work), often under a different
+      equipment ID from the request (group searches cover both).
+    - sched (transmission table): outage requests with planned start and end (including future
+      ones), status, and the ISO's reported actuals.
+
+    Rows from the two tables are never combined. overlaps lists the other table's records whose
+    times overlap the row, with start and end differences in minutes (theirs minus this row's),
+    or "none". One active spell can span several requests and one request can show up as
+    several spells. state is completed, in progress, planned, not started (planned dates
+    passed), or ignored; "the last time it was out" is the newest completed or in-progress
+    row in either table, never a planned one. All times are as the tables store them, in the
+    market's local time, which the header states (MISO: EST all year). An active row's end is
+    the first snapshot (about every 15 minutes) without the line, so it can be a snapshot late.
+    Only MISO uses the active table (as in EnergyCore); other markets list transmission-table
+    rows only. annotations lists the monitored elements annotated
+    on the outage for a window overlapping the row.
+
+    Args:
+        market: Market the outage is in: miso, spp, pjm, ercot, or caiso (each with its own IDs).
+        outage_id: One outage equipment ID or group ID.
+        id_type: equipment or group.
+        table: comb (both tables), act (active table only) or sched (transmission table only),
+            like EnergyCore's miso:comb:g:, miso:act:g: and miso:sched:g: outage filters.
+        include_groups: For an equipment ID, also every member of its groups and their associated
+            groups (as get_outage_documentation and get_outage_quicklinks do).
+        start_date: First day, YYYY-MM-DD; records out on or after it. Default: 5 years ago.
+        end_date: Last day, YYYY-MM-DD. Default: no limit (future requests included).
+        apply_regression_ignore_rules: Drop requests EnergyCore's regression ignore rules exclude
+            (cancelled, denied and the like); the header counts them. false lists them as ignored.
+        include_planned: Include requests that have not started yet, labeled planned.
+        max_rows: Most rows to list (newest first). 0 lists all of them.
+        max_note_chars: Longest flag note per row; 0 shows the whole note.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("id_type", id_type, ["equipment", "group"])
+    _check_choice("table", table, outage_history.TABLES)
+    eng = engine()
+    warnings = []
+    tz = autoflow.market_time_zone(eng, market)
+    now = datetime.datetime.now(tz).replace(tzinfo=None) if tz else datetime.datetime.now()
+    start = datetime.date.fromisoformat(start_date) if start_date else now.date() - datetime.timedelta(days=5 * 365)
+    end = datetime.date.fromisoformat(end_date) if end_date else None
+
+    ids, groups = outage_history.expand_ids(eng, market, outage_id, id_type, include_groups)
+    df, counts = outage_history.history(eng, market, ids, table, start, end, apply_regression_ignore_rules,
+                                        include_planned, now, warn=warnings.append)
+    names = outage_groups.equipment_names(eng, market, ids, warn=warnings.append)
+
+    lines = [f"Market: {market.upper()}",
+             f"Searched: {'group' if id_type == 'group' else 'equipment'} {osearch.clean_id(outage_id)}"
+             + (f"; groups {', '.join(_group_label(market, g) for g in groups)}" if groups else
+                "; not in any outage group" if id_type == "equipment" and include_groups else ""),
+             "Equipment: " + ", ".join(_equipment_label(market, e, names) for e in ids),
+             f"Window: {start} to {end or 'no end'}; tables: {table}",
+             f"Times: {outage_history.time_zone_label(eng, market)}"]
+    has_active = long_lodf.supports_active_outages(eng, market)
+    if not has_active and table != "sched":
+        lines.append(f"Active table: not used for {market.upper()} (EnergyCore's active outage tools are MISO only), "
+                     "so every row is from the transmission table.")
+    if df.empty:
+        return "\n".join(lines + ["", "No outage records in this window."] + _warnings_section(warnings))
+    for t, label in (("act", "Active table"), ("sched", "Transmission table")):
+        part = df[df["table"] == t]
+        if table in ("comb", t) and (t == "sched" or has_active):
+            lines.append(f"{label}: {len(part)} rows" + (f", {int((part['overlaps'] == 'none').sum())} with no "
+                                                          "overlapping record in the other table"
+                                                          if table == "comb" and has_active else ""))
+    if counts["ignored_dropped"]:
+        lines.append(f"Dropped {counts['ignored_dropped']} request(s) the regression ignore rules exclude "
+                     "(apply_regression_ignore_rules=false lists them).")
+    if counts["planned_dropped"]:
+        lines.append(f"Dropped {counts['planned_dropped']} planned request(s) (include_planned=false).")
+    last = df[df["state"].isin(["completed", "in progress"])]
+    if not last.empty:
+        r = last.iloc[0]
+        lines.append(f"Last time out: {r['table']} {r['record_id']}, {_fmt_dt(r['actual_start'])} to "
+                     f"{_fmt_dt(r['actual_end']) if pd.notna(r['actual_end']) else 'still out'} ({r['state']})")
+
+    users = flags_lib.user_names(eng, df["user_id"].dropna().unique()) if "user_id" in df else {}
+    total = len(df)
+    shown = df if not max_rows else df.head(max_rows)
+    if len(shown) < total:
+        lines.append(f"(Showing the newest {len(shown)} of {total} rows; pass max_rows=0 for all.)")
+    group_map = long_lodf.groups_for_equipment(eng, market, ids)
+
+    header = ["table", "equipment_id", "name", "equipment_type", "kv", "group_ids", "record_id", "state",
+              "actual_start", "actual_end", "planned_start", "planned_end", "request_status", "duration_hr",
+              "overlaps", "annotations", "flag", "flagged_by", "flag_updated", "flag_note"]
+    lines += ["", "\t".join(header)]
+    for r in shown.to_dict("records"):
+        note = " ".join(str(r.get("notes") or "").split())
+        if max_note_chars and len(note) > max_note_chars:
+            note = note[:max_note_chars] + "..."
+        flag = r.get("flag_type")
+        flag = ("" if flag is None or (isinstance(flag, float) and pd.isna(flag)) else (flag or "note only"))
+        if flag and r.get("flagged_in") not in (None, market):
+            flag += f" (set in {str(r['flagged_in']).upper()})"
+        uid = r.get("user_id")
+        kv = r.get("kv")
+        row = [r["table"], links.md(str(r["equipment_id"]), links.outage(market, r["equipment_id"])), r["name"] or "",
+               r.get("equipment_type") or "", "" if kv is None or pd.isna(kv) else f"{float(kv):g}",
+               ", ".join(_group_label(market, g) for g in group_map.get(int(r["equipment_id"]), [])),
+               r["record_id"], r["state"], _fmt_dt(r["actual_start"]), _fmt_dt(r["actual_end"]),
+               _fmt_dt(r.get("planned_start")), _fmt_dt(r.get("planned_end")), "" if pd.isna(r.get("request_status")) else r["request_status"],
+               r["duration_hr"], r["overlaps"], r["annotations"], flag,
+               users.get(int(uid), "") if uid is not None and not pd.isna(uid) else "",
+               _fmt_dt(r.get("flag_updated")) if flag else "", note]
+        lines.append("\t".join(" ".join(str(c).split()) for c in row))
+    return "\n".join(lines + _warnings_section(warnings))
 
 
 def _equipment_label(market: str, equipment_id: str, names: dict) -> str:
