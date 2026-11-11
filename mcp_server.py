@@ -43,6 +43,7 @@ from lib import notes_cache
 from lib import outage_impacts
 from lib import outage_groups
 from lib import outage_history
+from lib import returns as returns_lib
 from lib import outage_search as osearch
 from lib import sced
 from lib import shadow_forecasts
@@ -101,6 +102,8 @@ server = MCPServer(
         "monitored elements the desk quicklinked to an outage or group (in any market), and "
         "get_monitored_element_notes gives all desk notes on elements over a date range. "
         "get_nodal_prices gives nodal DA, RT and forecast LMPs with energy, congestion and loss. "
+        "get_returns gives our actual trading returns split into energy, congestion and loss, by day, hour, or "
+        "node (path for ERCOT). "
         "get_constraint_factors gives a constraint's promoted shift factors: the most positive and most "
         "negative pnodes. list_flagged_outages lists every outage the desk flagged (red = alert/auto_alert) "
         "over a date range; get_generator_outages gives IIR generator outages and derates, current or "
@@ -1222,6 +1225,114 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
         table = _tsv(rows.rename(columns=short), [short.get(c, c) for c in cols], decimals=2)
         lines += table
     return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_returns(market: str, start_date: str | None = None, end_date: str | None = None, group_by: str = "day",
+                nodes: list[str] | None = None, bid_types: list[str] | None = None, max_rows: int = 60) -> str:
+    """Our actual trading returns (P&L of cleared virtual bids), as EnergyCore computes and
+    stores them, split into energy, congestion and loss, summed by day, hour, or node (path
+    for ERCOT).
+
+    Returns are what we actually bid and cleared, not a back test. INC earns cleared MW x
+    (DA - RT) of each component, DEC cleared MW x (RT - DA); ERCOT PTP paths earn cleared MW x
+    (path RT spread - path DA spread), almost all congestion (ERCOT loss is 0). energy +
+    congestion + loss = lmp_return; total_return = lmp_return - fees (bid, clear, and MISO DA
+    opres charges on decs). By day, day_total is EnergyCore's official daily total, which also
+    subtracts day-level opres charges (or the desk's override) and misc fees, so it can differ
+    from the sum of the bids. Hours are hour ending 1-24 in market time (MISO EST all year);
+    trade days are market days. Today's RT is partial, so today's returns are preliminary.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        start_date: First trade day, YYYY-MM-DD. Default: 7 days before end_date.
+        end_date: Last trade day, YYYY-MM-DD. Default: yesterday.
+        group_by: day, hour (summed over the days), or node (path for ERCOT; best first, and the
+            worst too when the list is cut).
+        nodes: Only bids at these nodes (market pnode identifiers or names; for ERCOT, either end
+            of a path).
+        bid_types: Only these bid types: INC, DEC (ERCOT: PTP).
+        max_rows: Most rows to list. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("group_by", group_by, returns_lib.GROUPS)
+    today = datetime.date.today()
+    end = datetime.date.fromisoformat(end_date) if end_date else today - datetime.timedelta(days=1)
+    start = datetime.date.fromisoformat(start_date) if start_date else end - datetime.timedelta(days=6)
+    if end < start:
+        raise ValueError("end_date is before start_date.")
+    if (end - start).days > 400:
+        raise ValueError("At most 400 days per call.")
+    eng = engine()
+    df = returns_lib.bid_returns(eng, market, start, end, group_by, nodes=nodes, bid_types=bid_types)
+    filters = ([f"nodes {', '.join(nodes)}"] if nodes else []) + ([f"bid types {', '.join(bid_types)}"] if bid_types else [])
+    lines = [f"Market: {market.upper()} returns, trade days {start} to {end}"
+             + (f" ({'; '.join(filters)})" if filters else ""),
+             "Hours: hour ending 1-24 in market time" + (" (MISO EST all year)." if market == "miso" else ".")]
+    if df.empty:
+        return "\n".join(lines + ["", "No submitted bids in this range."])
+
+    tot = df[returns_lib.SUMS].sum()
+    lines.append(f"Total: {tot.total_return:,.0f} = energy {tot.energy_return:,.0f} + congestion "
+                 f"{tot.congestion_return:,.0f} + loss {tot.loss_return:,.0f} - fees {tot.fees:,.0f}; "
+                 f"cleared {tot.cleared_mw:,.0f} MWh of {tot.bid_mw:,.0f} bid"
+                 + (f" ({tot.total_return / tot.cleared_mw:,.2f} $/MWh)" if tot.cleared_mw else "") + ".")
+    if end >= today:
+        lines.append("Includes today or later: RT is partial, so those returns are preliminary.")
+    if tot.preliminary_rows:
+        lines.append(f"{tot.preliminary_rows:,.0f} bid rows are marked preliminary by EnergyCore.")
+    if market == "ercot":
+        lines.append("ERCOT: PTP paths (source -> sink); loss is 0 and congestion is derived, so returns are "
+                     "essentially all congestion.")
+
+    daily = returns_lib.daily_summaries(eng, market, start, end)
+    if not daily.empty:
+        daily["grp"] = pd.to_datetime(daily["grp"]).dt.date
+    if not daily.empty and not nodes and not bid_types:
+        adj = daily["day_opres_charges"].sum() + daily["misc_fees"].sum()
+        lines.append(f"EnergyCore's official total (sum of its daily totals): {daily['day_total_return'].sum():,.0f}"
+                     + (f", after {adj:,.0f} of day-level opres charges and misc fees that are not on any bid, "
+                        "so they are in no hour or node row." if abs(adj) >= 1 else "."))
+    bid_days = returns_lib.trade_days(eng, market, start, end)
+    missing = [d for d in (start + datetime.timedelta(days=k) for k in range((min(end, today) - start).days + 1))
+               if d not in bid_days]
+    if missing:
+        lines.append("No submitted bids on: " + ", ".join(str(d) for d in missing) + ".")
+
+    if group_by == "day":
+        df["grp"] = pd.to_datetime(df["grp"]).dt.date
+        if not daily.empty and not nodes and not bid_types:
+            df = df.merge(daily, on="grp", how="left")
+        df = df.sort_values("grp")
+    elif group_by == "hour":
+        df = df.sort_values("grp")
+        df["grp"] = df["grp"].map(lambda h: f"HE {int(h)}")
+    else:
+        df = df.sort_values("total_return", ascending=False)
+
+    total = len(df)
+    if max_rows and total > max_rows:
+        if group_by == "node":
+            half = max_rows // 2
+            df = pd.concat([df.head(max_rows - half), df.tail(half)])
+            lines.append(f"(Showing the best {max_rows - half} and worst {half} of {total}; pass max_rows=0 for all.)")
+        else:
+            df = df.head(max_rows)
+            lines.append(f"(Showing the first {max_rows} of {total} rows; pass max_rows=0 for all.)")
+
+    df["per_mwh"] = [r / m if m else float("nan") for r, m in zip(df["total_return"], df["cleared_mw"])]
+    for c in ("bids", "cleared_bids"):
+        df[c] = df[c].astype(int)
+    label = {"day": "trade_dt", "hour": "hour", "node": "path" if market == "ercot" else "node"}[group_by]
+    df = df.rename(columns={"grp": label, "total_return": "total", "energy_return": "energy",
+                            "congestion_return": "congestion", "loss_return": "loss", "day_total_return": "day_total"})
+    cols = [label] + (["node_name"] if group_by == "node" and market != "ercot" else []) + \
+           ["total", "energy", "congestion", "loss", "fees", "per_mwh", "cleared_mw"] + \
+           (["inc_mw", "dec_mw"] if market != "ercot" else []) + ["cleared_bids", "bids"] + \
+           (["day_total"] if "day_total" in df.columns else [])
+    lines += [""] + _tsv(df, cols, decimals=2)
+    return "\n".join(lines)
 
 
 @server.tool(annotations=READ_ONLY)
