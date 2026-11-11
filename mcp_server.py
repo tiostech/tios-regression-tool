@@ -39,9 +39,12 @@ from lib import long_lodf
 from lib import market_conditions
 from lib import monitored_elements
 from lib import network
+from lib import nodal_prices
 from lib import notes_cache
 from lib import outage_impacts
 from lib import outage_groups
+from lib import outage_history
+from lib import returns as returns_lib
 from lib import outage_search as osearch
 from lib import sced
 from lib import shadow_forecasts
@@ -72,6 +75,12 @@ server = MCPServer(
     name="energycore-outages",
     instructions=(
         "Read-only access to the trading desk's transmission outage search (tioscore_production). "
+        "Market data (outage times, shadow prices, LMPs, forecasts, hours) is in the market's own time: MISO is "
+        "EST all year (UTC-5, no daylight saving), SPP and ERCOT Central, PJM Eastern, CAISO Pacific. Hours are "
+        "hour ending 1-24 (HE 1 is 00:00-01:00, HE 24 is 23:00-24:00). Report market data in market time as the "
+        "tools give it, never converted, and label it, e.g. \"09:14 EST (MISO time)\" or \"HE 10 (market time)\". "
+        "Traders themselves work in Central, so times about their own day (when a run finished, when data will "
+        "be ready) are in Central, labeled CT, as the FID tools give them. "
         "Use list_upcoming_outages to find outages planned to start on a day, then "
         "get_outage_documentation for the outages that have history. The outage_briefing prompt "
         "holds the desk's report instructions. To explain why constraints bound on a day, use "
@@ -80,6 +89,7 @@ server = MCPServer(
         "with complete data. get_market_conditions gives energy prices, RTEP, and the stress index; "
         "get_autoflow gives autoflow over a date range; get_shadow_forecasts gives the desk's RT shadow price "
         "forecasts for a day, get_forecast_model shows the models and features behind a constraint's forecast, "
+        "list_model_groups lists a forecast day's model groups (T+2 too, before they are applied), "
         "and get_forecast_accuracy scores the forecasts against actuals over a date range; "
         "get_outage_impacts checks outages (including planned ones on future days) against a constraint or "
         "monitored element, or one monitored element/outage pair with outage_id. "
@@ -87,9 +97,14 @@ server = MCPServer(
         "EnergyCore pages; keep those links when you mention them in your answer. get_monitored_element gives an "
         "element's description and the elements it is linked to, often the same line in another market under a "
         "different name; check it before saying a constraint is not shared with another market. "
+        "get_outage_history lists every time an outage (or its group) was out, from both the active and "
+        "transmission tables, for a last-time-out recap. "
         "get_outage_group gives an outage's groups and every group member; get_outage_quicklinks gives the "
         "monitored elements the desk quicklinked to an outage or group (in any market), and "
         "get_monitored_element_notes gives all desk notes on elements over a date range. "
+        "get_nodal_prices gives nodal DA, RT and forecast LMPs with energy, congestion and loss. "
+        "get_returns gives our actual trading returns split into energy, congestion and loss, by day, hour, or "
+        "node (path for ERCOT). "
         "get_constraint_factors gives a constraint's promoted shift factors: the most positive and most "
         "negative pnodes. list_flagged_outages lists every outage the desk flagged (red = alert/auto_alert) "
         "over a date range; get_generator_outages gives IIR generator outages and derates, current or "
@@ -251,8 +266,9 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
 
     Returns tab-separated rows. note_matches counts notes naming the equipment ID;
     group_note_matches counts notes naming any of its groups. MISO notes usually name an
-    outage by group (GID), so for an outage with group_note_matches, call
-    get_outage_documentation with id_type="group" and each of its group_ids. Outages with
+    outage by group (GID); get_outage_documentation with a MISO equipment ID also searches its
+    groups. In other markets, for an outage with group_note_matches, call it with
+    include_groups=True. Outages with
     note_matches, group_note_matches, annotations, and flag all empty have no history, so
     get_outage_documentation would return nothing useful for them; their names are not
     linked, to keep the listing short.
@@ -332,22 +348,24 @@ def list_upcoming_outages(market: str, days_ahead: int = 2, date: str | None = N
 @_readable_errors
 def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipment",
                              notes_market: str | None = None, lookback: str = "3 Years", context: str = "All",
-                             max_notes_per_element: int = 25) -> str:
+                             max_notes_per_element: int = 25, include_groups: bool | None = None) -> str:
     """Documentation for one outage: the same text as "Copy Full Output to Clipboard" on the
     Outage & Shadow Price Search page.
 
     It has the match fields, flag notes, outage annotations, quick notes that mention the
-    outage (with summed shadow prices), and monitored element descriptions.
+    outage (with summed shadow prices), and monitored element descriptions. The first line
+    says exactly what was searched (equipment IDs and groups).
 
     MISO desk notes usually name an outage by its group ("GID 2972"), not its equipment ID,
-    so an equipment search often finds no notes for an outage that has plenty. For an outage
-    with group IDs (list_upcoming_outages gives them, with group_note_matches), search by
-    group: one call per group ID. A group search also finds the notes naming the group's
-    member equipment.
+    so a MISO equipment search also searches every group the equipment belongs to, in one
+    combined search: each note, flag note and annotation appears once. A group search also
+    finds the notes naming the group's member equipment. In other markets, pass
+    include_groups=True (or id_type="group" with the group IDs) to do the same.
 
     Args:
         market: Market the outage is in: miso, spp, pjm, ercot, or caiso.
-        outage_id: One equipment ID, one group ID, or search text, depending on id_type.
+        outage_id: Equipment IDs or group IDs (comma-separated for several, searched together),
+            or search text, depending on id_type.
         id_type: equipment, group, or text (comma-separated search terms).
         notes_market: Market whose notes and shadow prices to search, when different from the
             outage market (for example MISO outages in SPP or PJM notes). Default: market.
@@ -355,6 +373,8 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
         context: All, rt_shadow, rt_shadow_forecast, or da_shadow.
         max_notes_per_element: Most quick notes to show for each monitored element (newest
             first), to keep the output a manageable size. 0 shows all of them.
+        include_groups: For id_type equipment, also search the equipment's outage groups.
+            Default: true for MISO, false for other markets.
     """
     _check_choice("market", market, osearch.MARKETS)
     notes_market = notes_market or market
@@ -366,14 +386,42 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     eng = engine()
     warnings = []
     search_type = ID_TYPES[id_type]
+    if include_groups is None:
+        include_groups = market == "miso"
 
-    search_fields, raw_eq_ids, _ = osearch.build_search_fields(eng, search_type, outage_id, notes_market, market,
-                                                               warn=warnings.append)
+    if id_type == "text":
+        searches = [(search_type, outage_id)]
+        searched = None
+    else:
+        ids = list(dict.fromkeys(osearch.clean_id(i) for i in outage_id.split(",")))
+        ids = [i for i in ids if i]
+        if not ids:
+            raise ValueError(f"No {id_type} ID found in {outage_id!r}.")
+        group_ids = ids if id_type == "group" else []
+        if id_type == "equipment" and include_groups:
+            probe = [{"outage_equipment_id": i} for i in ids]
+            upcoming_outages.add_group_ids(eng, market, probe, warn=warnings.append)
+            group_ids = list(dict.fromkeys(g for o in probe for g in o["group_ids"]))
+        searches = ([(search_type, i) for i in ids] if id_type == "equipment" else []) + \
+                   [("Group ID", g) for g in group_ids]
+        searched = _searched_line(market, id_type, ids, group_ids, include_groups)
+
+    search_fields, raw_eq_ids, outage_names = [], [], []
+    for s_type, s_id in searches:
+        fields, eq_ids, _ = osearch.build_search_fields(eng, s_type, s_id, notes_market, market,
+                                                        warn=warnings.append)
+        search_fields += fields
+        raw_eq_ids += eq_ids
+        if s_type == search_type:
+            outage_names += osearch.fetch_outage_names(eng, s_type, s_id, market, eq_ids, warn=warnings.append)
+    search_fields = list(dict.fromkeys(search_fields))
+    raw_eq_ids = list(dict.fromkeys(raw_eq_ids))
+    outage_names = list(dict.fromkeys(outage_names))
     if not search_fields:
-        return "\n".join(["No search fields could be built from that input, so there is nothing to search for."]
+        return "\n".join(([searched] if searched else [])
+                         + ["No search fields could be built from that input, so there is nothing to search for."]
                          + _warnings_section(warnings))
 
-    outage_names = osearch.fetch_outage_names(eng, search_type, outage_id, market, raw_eq_ids, warn=warnings.append)
     annotations = osearch.fetch_outage_annotations(eng, raw_eq_ids, market, notes_market, warn=warnings.append)
     flag_notes = osearch.dedupe_flag_notes(
         osearch.fetch_transmission_outage_flags(eng, notes_market, raw_eq_ids, warn=warnings.append,
@@ -395,7 +443,7 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     if max_notes_per_element and not df.empty:
         df_shown = df.groupby('official_monitored_element_id', sort=False).head(max_notes_per_element)
 
-    lines = []
+    lines = [searched] if searched else []
     if raw_eq_ids:
         lines.append("EnergyCore outage search: " + ", ".join(links.md(e, links.outage(market, e)) for e in raw_eq_ids))
     lines.append(osearch.clipboard_text(notes_market, search_fields, outage_names, flag_notes, me_groups, df_shown,
@@ -409,10 +457,25 @@ def get_outage_documentation(market: str, outage_id: str, id_type: str = "equipm
     return "\n".join(lines + _warnings_section(warnings))
 
 
+def _searched_line(market: str, id_type: str, ids: list[str], group_ids: list[str], include_groups: bool) -> str:
+    """Names exactly what get_outage_documentation searched, so an empty result is unambiguous."""
+    def group(g):
+        return links.md(f"GID {g}", links.outage_group(market, g)) if market == "miso" else f"group {g}"
+    groups = ", ".join(group(g) for g in group_ids)
+    if id_type == "group":
+        return f"Searched: {groups} (with their associated groups and member equipment)"
+    eq = ", ".join(links.md(e, links.outage(market, e)) for e in ids)
+    if not include_groups:
+        return f"Searched: equipment {eq} (its groups not included)"
+    if not group_ids:
+        return f"Searched: equipment {eq}; no outage groups"
+    return f"Searched: equipment {eq} and its groups {groups} (with their associated groups and member equipment)"
+
+
 def _tsv(df: pd.DataFrame, columns: list[str], decimals: int = 0) -> list[str]:
     """Tab-separated header and rows; floats rounded, NaN shown as empty."""
     def cell(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
+        if v is None or v is pd.NA or (isinstance(v, float) and pd.isna(v)):
             return ""
         if isinstance(v, float):
             return f"{v:.{decimals}f}"
@@ -754,6 +817,7 @@ def get_forecast_model(market: str, constraint_id: int, date: str | None = None,
     lines.append(f"The weights imply {total:.0f} for constraint {cid}; the forecast table has {table_total:.0f} "
                  f"(manual {shadow['manual_fc'].sum():.0f}, default {shadow['default_fc'].sum():.0f})."
                  + ("" if abs(total - table_total) <= max(5, 0.05 * table_total) else
+                    " They differ: this is an early (T+2) group, not applied until the next day." if group["early"] else
                     " They differ, so the forecast was edited after the models ran, or the group was not applied."))
 
     models["total_for_constraint"] = [None if (h := forecast_models.hourly_output(o, cid)) is None else h.sum()
@@ -841,6 +905,49 @@ def get_forecast_model(market: str, constraint_id: int, date: str | None = None,
            ["default_fc", "manual_fc", "forecast"] + (["actual"] if has_actuals else [])
     lines += _tsv(hourly, cols, decimals=1)
     return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def list_model_groups(market: str, date: str | None = None, days_ahead: int = 2, states: list[str] | None = None,
+                      name: str | None = None, constraint_ids: list[int] | None = None, max_groups: int = 100) -> str:
+    """The regression model groups for one forecast day, as on EnergyCore's model groups page,
+    largest estimated forecast first. Works for T+2: those groups are built early (state
+    early_finished) and are not applied until the next day, so they have no forecast-table
+    values yet.
+
+    Each row has the group's state, mode, estimated forecast, model count, and the constraints
+    it allocates its forecast to. Use get_forecast_model with one of those constraints for the
+    models and features.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        date: The forecast day, YYYY-MM-DD.
+        days_ahead: Days from today when date is not given (2 = T+2, the default).
+        states: Only these group states, for example ["early_finished"] or ["applied",
+            "auto_applied"]. Others: applied_unlocked, auto_not_applied, finished, failed.
+        name: Text to find in the group name.
+        constraint_ids: Only groups whose models cover one of these constraints.
+        max_groups: Most groups to list. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    day = _resolve_date(date, days_ahead)
+    eng = engine()
+    df = forecast_models.list_groups(eng, market, day, states=states, name=name, constraint_ids=constraint_ids)
+    lines = [f"Market: {market.upper()}", f"Forecast day: {day}"]
+    if df.empty:
+        return "\n".join(lines + ["", "No model groups match."])
+    lines.append("Groups: " + str(len(df)) + "; by state: "
+                 + ", ".join(f"{k} {v}" for k, v in df["group_state"].value_counts().items()))
+    shown = df if not max_groups else df.head(max_groups)
+    if len(shown) < len(df):
+        lines.append(f"(Showing the {len(shown)} with the largest estimated forecast; pass max_groups=0 for all.)")
+    lines += ["", "\t".join(["group", "state", "mode", "est_forecast", "models", "constraints (allocation)"])]
+    for g in shown.itertuples():
+        alloc = ", ".join(f"{c} {float(p):.0%}" for c, p in (g.constraint_allocation or {}).items())
+        lines.append("\t".join([links.md(f"{g.id} {g.name}", links.model_group(market, g.id)), g.group_state,
+                                g.mode or "", f"{g.estimated_proposed_forecast or 0:.0f}", str(g.models), alloc]))
+    return "\n".join(lines)
 
 
 @server.tool(annotations=READ_ONLY)
@@ -1003,6 +1110,237 @@ def _autoflow_section(eng, market: str, constraint_id: int, day: datetime.date, 
                 lines += _tsv(changes, ["coefficient_type", "iso", "zone", "coefficient", "base_mw", "compare_mw",
                                         "d_leverage"], decimals=1)
     return lines
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = None, end_date: str | None = None,
+                     show: list[str] | None = None, granularity: str = "hour", max_rows: int = 400) -> str:
+    """Nodal LMPs for pnodes over a date range: actual DA and RT LMP with energy, congestion and
+    loss, and our forecast (FC) LMP, hour by hour or as daily averages.
+
+    Actuals are EnergyCore's hourly LMPs. DA is available through tomorrow once it publishes;
+    today's RT hours are preliminary (rt_prelim = 1) until settled. Hours are hour ending 1-24 in
+    market time (MISO is fixed EST). Energy = LMP - congestion - loss. ERCOT has no loss
+    component, and its congestion is derived (LMP minus average energy).
+
+    The FC LMP is priced the way the market's live bidding prices bids, without the adder.
+    Lion markets (MISO, PJM, SPP, CAISO): the newest Lion proposal's template names the
+    congestion forecast (fc_cong, currently the pure shadow-based RT congestion forecast) and
+    loss factor (fc_lf, currently RT), and the current version of its adder config names the
+    energy forecast (fc_energy, currently a flex DAEP), read as it stood at each day's
+    day-ahead deadline; fc_loss is fc_lf x fc_energy. ERCOT bids are Tiger paths, priced with
+    no energy forecast: fc_energy is 0 and the FC LMP is the Tiger template's congestion
+    forecast. The header names the proposal, template, config and forecasts used.
+
+    Every day, past ones included, is priced with today's setup: a back test of the current
+    setup, which is usually what traders want. It is not necessarily what was bid on a past
+    day (configs change), so don't use it for returns or "what did we bid"; say so if asked.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        nodes: Pnode names (e.g. "INDIANA.HUB", "51288-WESTERNHUB", "HB_NORTH"), market pnode
+            identifiers, or official pnode IDs. A unique part of a name also works.
+        start_date: First day, YYYY-MM-DD. Default: yesterday.
+        end_date: Last day, YYYY-MM-DD. Default: start_date, or tomorrow when start_date is not
+            given. At most 366 days.
+        show: Any of da, rt, fc. Default all three.
+        granularity: hour, or day (averages over the hours present).
+        max_rows: Most rows to list per node (oldest first). 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("granularity", granularity, ("hour", "day"))
+    show = [x.lower() for x in (show or ["da", "rt", "fc"])]
+    for x in show:
+        _check_choice("show", x, ("da", "rt", "fc"))
+    if not nodes:
+        raise ValueError("Give at least one node.")
+    today = datetime.date.today()
+    start = datetime.date.fromisoformat(start_date) if start_date else today - datetime.timedelta(days=1)
+    end = (datetime.date.fromisoformat(end_date) if end_date
+           else start if start_date else today + datetime.timedelta(days=1))
+    if end < start:
+        raise ValueError("end_date is before start_date.")
+    if (end - start).days >= nodal_prices.MAX_DAYS:
+        raise ValueError(f"At most {nodal_prices.MAX_DAYS} days per call.")
+
+    eng = engine()
+    pnodes, messages = nodal_prices.resolve_nodes(eng, market, nodes)
+    lines = [f"Market: {market.upper()}", f"Days: {start} to {end}"] + messages
+    if pnodes.empty:
+        return "\n".join(lines)
+    ids = [int(i) for i in pnodes["id"]]
+    keys = ["dt", "hr", "official_pnode_id"]
+    df = pd.DataFrame(columns=keys)
+    if "da" in show or "rt" in show:
+        df = nodal_prices.actuals(eng, market, ids, start, end, today)
+    warnings = []
+    if "fc" in show:
+        fc, lion = nodal_prices.forecasts(eng, market, ids, start, end, warn=warnings.append)
+        if lion and lion["kind"] == "lion":
+            energy = lion["energy_inc"] or "none"
+            if lion["energy_dec"] and lion["energy_dec"] != lion["energy_inc"]:
+                energy += f" (inc; dec bids use {lion['energy_dec']})"
+            lines.append(f"FC priced as Lion proposal {lion['proposal_id']} (trade day {lion['trade_dt']}), template "
+                         f"{lion['template']}, adder config {lion['adder_config']} (tios_config {lion['tios_config_id']}, "
+                         f"current): energy {energy}, congestion {lion['congestion_column']}, "
+                         f"loss factor {lion['loss_column']}. Past days use this current setup (a back test).")
+        elif lion:
+            lines.append(f"FC priced as Tiger proposal {lion['proposal_id']} (trade day {lion['trade_dt']}), template "
+                         f"{lion['template']}: no energy forecast (energy 0), congestion {lion['congestion_column']}, "
+                         f"loss factor {lion['loss_column']}. The FC LMP is the congestion forecast.")
+        else:
+            lines.append(f"FC: no {market.upper()} Lion or Tiger proposals, so no energy forecast; fc_cong is "
+                         "rt_congestion_forecast_pure_shadow_based and fc_lf rt_lf_forecast.")
+        if not fc.empty:
+            df = fc if df.empty else df.merge(fc, on=keys, how="outer")
+
+    columns = {"da": ["da_lmp", "da_energy", "da_congestion", "da_loss"],
+               "rt": ["rt_lmp", "rt_energy", "rt_congestion", "rt_loss", "rt_preliminary"],
+               "fc": ["fc_lmp", "fc_energy", "fc_congestion", "fc_loss", "fc_loss_factor"]}
+    short = {"da_congestion": "da_cong", "rt_congestion": "rt_cong", "fc_congestion": "fc_cong",
+             "fc_loss_factor": "fc_lf", "rt_preliminary": "rt_prelim"}
+    wanted = [c for k in show for c in columns[k] if c in df.columns]
+    for p in pnodes.itertuples():
+        rows = df[df["official_pnode_id"] == p.id].sort_values(["dt", "hr"]) if not df.empty else df
+        rows = rows.dropna(subset=[c for c in wanted if c != "rt_preliminary"], how="all")
+        if "rt_preliminary" in rows.columns:
+            rows = rows.assign(rt_preliminary=rows["rt_preliminary"].astype("Int64"))
+        retired = f", retired {p.deleted_at:%Y-%m-%d}" if pd.notna(p.deleted_at) else ""
+        lines += ["", f"=== {p.name} (pnode {p.id}, identifier {p.market_pnode_identifier}, "
+                      f"{p.node_type or 'type unknown'}{retired}) ==="]
+        missing = [k.upper() for k in show
+                   if f"{k}_congestion" not in rows.columns or rows[f"{k}_congestion"].isna().all()]
+        if missing:
+            lines.append(f"No {', '.join(missing)} prices for this node in this range"
+                         + (" (EnergyCore has no congestion forecast for it)." if "FC" in missing else "."))
+        if "fc" in show and "fc_energy" in rows.columns and rows["fc_congestion"].notna().any() \
+                and rows["fc_energy"].isna().all():
+            lines.append("No energy forecast for these days, so fc_lmp is blank; fc_cong and fc_lf are shown.")
+        if rows.empty:
+            continue
+        if granularity == "day":
+            rows = rows.groupby("dt", as_index=False).agg(
+                hours=("hr", "count"), **{c: (c, "max" if c == "rt_preliminary" else "mean") for c in wanted})
+            cols = ["dt", "hours"] + wanted
+        else:
+            cols = ["dt", "hr"] + wanted
+        total = len(rows)
+        if max_rows and total > max_rows:
+            rows = rows.head(max_rows)
+            lines.append(f"(Showing the first {max_rows} of {total} rows; narrow the dates, use granularity=day, "
+                         "or pass max_rows=0.)")
+        table = _tsv(rows.rename(columns=short), [short.get(c, c) for c in cols], decimals=2)
+        lines += table
+    return "\n".join(lines + _warnings_section(warnings))
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_returns(market: str, start_date: str | None = None, end_date: str | None = None, group_by: str = "day",
+                nodes: list[str] | None = None, bid_types: list[str] | None = None, max_rows: int = 60) -> str:
+    """Our actual trading returns (P&L of cleared virtual bids), as EnergyCore computes and
+    stores them, split into energy, congestion and loss, summed by day, hour, or node (path
+    for ERCOT).
+
+    Returns are what we actually bid and cleared, not a back test. INC earns cleared MW x
+    (DA - RT) of each component, DEC cleared MW x (RT - DA); ERCOT PTP paths earn cleared MW x
+    (path RT spread - path DA spread), almost all congestion (ERCOT loss is 0). energy +
+    congestion + loss = lmp_return; total_return = lmp_return - fees (bid, clear, and MISO DA
+    opres charges on decs). By day, day_total is EnergyCore's official daily total, which also
+    subtracts day-level opres charges (or the desk's override) and misc fees, so it can differ
+    from the sum of the bids. Hours are hour ending 1-24 in market time (MISO EST all year);
+    trade days are market days. Today's RT is partial, so today's returns are preliminary.
+
+    Args:
+        market: miso, spp, pjm, ercot, or caiso.
+        start_date: First trade day, YYYY-MM-DD. Default: 7 days before end_date.
+        end_date: Last trade day, YYYY-MM-DD. Default: yesterday.
+        group_by: day, hour (summed over the days), or node (path for ERCOT; best first, and the
+            worst too when the list is cut).
+        nodes: Only bids at these nodes (market pnode identifiers or names; for ERCOT, either end
+            of a path).
+        bid_types: Only these bid types: INC, DEC (ERCOT: PTP).
+        max_rows: Most rows to list. 0 lists all of them.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("group_by", group_by, returns_lib.GROUPS)
+    today = datetime.date.today()
+    end = datetime.date.fromisoformat(end_date) if end_date else today - datetime.timedelta(days=1)
+    start = datetime.date.fromisoformat(start_date) if start_date else end - datetime.timedelta(days=6)
+    if end < start:
+        raise ValueError("end_date is before start_date.")
+    if (end - start).days > 400:
+        raise ValueError("At most 400 days per call.")
+    eng = engine()
+    df = returns_lib.bid_returns(eng, market, start, end, group_by, nodes=nodes, bid_types=bid_types)
+    filters = ([f"nodes {', '.join(nodes)}"] if nodes else []) + ([f"bid types {', '.join(bid_types)}"] if bid_types else [])
+    lines = [f"Market: {market.upper()} returns, trade days {start} to {end}"
+             + (f" ({'; '.join(filters)})" if filters else ""),
+             "Hours: hour ending 1-24 in market time" + (" (MISO EST all year)." if market == "miso" else ".")]
+    if df.empty:
+        return "\n".join(lines + ["", "No submitted bids in this range."])
+
+    tot = df[returns_lib.SUMS].sum()
+    lines.append(f"Total: {tot.total_return:,.0f} = energy {tot.energy_return:,.0f} + congestion "
+                 f"{tot.congestion_return:,.0f} + loss {tot.loss_return:,.0f} - fees {tot.fees:,.0f}; "
+                 f"cleared {tot.cleared_mw:,.0f} MWh of {tot.bid_mw:,.0f} bid"
+                 + (f" ({tot.total_return / tot.cleared_mw:,.2f} $/MWh)" if tot.cleared_mw else "") + ".")
+    if end >= today:
+        lines.append("Includes today or later: RT is partial, so those returns are preliminary.")
+    if tot.preliminary_rows:
+        lines.append(f"{tot.preliminary_rows:,.0f} bid rows are marked preliminary by EnergyCore.")
+    if market == "ercot":
+        lines.append("ERCOT: PTP paths (source -> sink); loss is 0 and congestion is derived, so returns are "
+                     "essentially all congestion.")
+
+    daily = returns_lib.daily_summaries(eng, market, start, end)
+    if not daily.empty:
+        daily["grp"] = pd.to_datetime(daily["grp"]).dt.date
+    if not daily.empty and not nodes and not bid_types:
+        adj = daily["day_opres_charges"].sum() + daily["misc_fees"].sum()
+        lines.append(f"EnergyCore's official total (sum of its daily totals): {daily['day_total_return'].sum():,.0f}"
+                     + (f", after {adj:,.0f} of day-level opres charges and misc fees that are not on any bid, "
+                        "so they are in no hour or node row." if abs(adj) >= 1 else "."))
+    bid_days = returns_lib.trade_days(eng, market, start, end)
+    missing = [d for d in (start + datetime.timedelta(days=k) for k in range((min(end, today) - start).days + 1))
+               if d not in bid_days]
+    if missing:
+        lines.append("No submitted bids on: " + ", ".join(str(d) for d in missing) + ".")
+
+    if group_by == "day":
+        df["grp"] = pd.to_datetime(df["grp"]).dt.date
+        if not daily.empty and not nodes and not bid_types:
+            df = df.merge(daily, on="grp", how="left")
+        df = df.sort_values("grp")
+    elif group_by == "hour":
+        df = df.sort_values("grp")
+        df["grp"] = df["grp"].map(lambda h: f"HE {int(h)}")
+    else:
+        df = df.sort_values("total_return", ascending=False)
+
+    total = len(df)
+    if max_rows and total > max_rows:
+        if group_by == "node":
+            half = max_rows // 2
+            df = pd.concat([df.head(max_rows - half), df.tail(half)])
+            lines.append(f"(Showing the best {max_rows - half} and worst {half} of {total}; pass max_rows=0 for all.)")
+        else:
+            df = df.head(max_rows)
+            lines.append(f"(Showing the first {max_rows} of {total} rows; pass max_rows=0 for all.)")
+
+    df["per_mwh"] = [r / m if m else float("nan") for r, m in zip(df["total_return"], df["cleared_mw"])]
+    for c in ("bids", "cleared_bids"):
+        df[c] = df[c].astype(int)
+    label = {"day": "trade_dt", "hour": "hour", "node": "path" if market == "ercot" else "node"}[group_by]
+    df = df.rename(columns={"grp": label, "total_return": "total", "energy_return": "energy",
+                            "congestion_return": "congestion", "loss_return": "loss", "day_total_return": "day_total"})
+    cols = [label] + (["node_name"] if group_by == "node" and market != "ercot" else []) + \
+           ["total", "energy", "congestion", "loss", "fees", "per_mwh", "cleared_mw"] + \
+           (["inc_mw", "dec_mw"] if market != "ercot" else []) + ["cleared_bids", "bids"] + \
+           (["day_total"] if "day_total" in df.columns else [])
+    lines += [""] + _tsv(df, cols, decimals=2)
+    return "\n".join(lines)
 
 
 @server.tool(annotations=READ_ONLY)
@@ -1405,6 +1743,129 @@ def get_constraint_drivers(market: str, constraint_id: int, date: str | None = N
 
     return "\n".join(lines + _warnings_section(warnings))
 
+
+
+@server.tool(annotations=READ_ONLY)
+@_readable_errors
+def get_outage_history(market: str, outage_id: str, id_type: str = "equipment", table: str = "comb",
+                       include_groups: bool = True, start_date: str | None = None, end_date: str | None = None,
+                       apply_regression_ignore_rules: bool = True, include_planned: bool = True,
+                       max_rows: int = 50, max_note_chars: int = 400) -> str:
+    """Every time an outage was out of service, newest first: one row per record from each of
+    the ISO's two outage tables, with actual and planned times, status, and desk flags. Use it
+    for a "last time out" recap: what the outage did the last time, compared with its flag note.
+
+    - act (active table): the ISO's real-time list of what is out. One row per out-of-service
+      spell, with actual start and end. The desk generally trusts these actuals most. Outages
+      are often only in this table (forced outages, unscheduled work), often under a different
+      equipment ID from the request (group searches cover both).
+    - sched (transmission table): outage requests with planned start and end (including future
+      ones), status, and the ISO's reported actuals.
+
+    Rows from the two tables are never combined. overlaps lists the other table's records whose
+    times overlap the row, with start and end differences in minutes (theirs minus this row's),
+    or "none". One active spell can span several requests and one request can show up as
+    several spells. state is completed, in progress, planned, not started (planned dates
+    passed), or ignored; "the last time it was out" is the newest completed or in-progress
+    row in either table, never a planned one. All times are as the tables store them, in the
+    market's local time, which the header states (MISO: EST all year). An active row's end is
+    the first snapshot (about every 15 minutes) without the line, so it can be a snapshot late.
+    Only MISO uses the active table (as in EnergyCore); other markets list transmission-table
+    rows only. annotations lists the monitored elements annotated
+    on the outage for a window overlapping the row.
+
+    Args:
+        market: Market the outage is in: miso, spp, pjm, ercot, or caiso (each with its own IDs).
+        outage_id: One outage equipment ID or group ID.
+        id_type: equipment or group.
+        table: comb (both tables), act (active table only) or sched (transmission table only),
+            like EnergyCore's miso:comb:g:, miso:act:g: and miso:sched:g: outage filters.
+        include_groups: For an equipment ID, also every member of its groups and their associated
+            groups (as get_outage_documentation and get_outage_quicklinks do).
+        start_date: First day, YYYY-MM-DD; records out on or after it. Default: 5 years ago.
+        end_date: Last day, YYYY-MM-DD. Default: no limit (future requests included).
+        apply_regression_ignore_rules: Drop requests EnergyCore's regression ignore rules exclude
+            (cancelled, denied and the like); the header counts them. false lists them as ignored.
+        include_planned: Include requests that have not started yet, labeled planned.
+        max_rows: Most rows to list (newest first). 0 lists all of them.
+        max_note_chars: Longest flag note per row; 0 shows the whole note.
+    """
+    _check_choice("market", market, osearch.MARKETS)
+    _check_choice("id_type", id_type, ["equipment", "group"])
+    _check_choice("table", table, outage_history.TABLES)
+    eng = engine()
+    warnings = []
+    tz = autoflow.market_time_zone(eng, market)
+    now = datetime.datetime.now(tz).replace(tzinfo=None) if tz else datetime.datetime.now()
+    start = datetime.date.fromisoformat(start_date) if start_date else now.date() - datetime.timedelta(days=5 * 365)
+    end = datetime.date.fromisoformat(end_date) if end_date else None
+
+    ids, groups = outage_history.expand_ids(eng, market, outage_id, id_type, include_groups)
+    df, counts = outage_history.history(eng, market, ids, table, start, end, apply_regression_ignore_rules,
+                                        include_planned, now, warn=warnings.append)
+    names = outage_groups.equipment_names(eng, market, ids, warn=warnings.append)
+
+    lines = [f"Market: {market.upper()}",
+             f"Searched: {'group' if id_type == 'group' else 'equipment'} {osearch.clean_id(outage_id)}"
+             + (f"; groups {', '.join(_group_label(market, g) for g in groups)}" if groups else
+                "; not in any outage group" if id_type == "equipment" and include_groups else ""),
+             "Equipment: " + ", ".join(_equipment_label(market, e, names) for e in ids),
+             f"Window: {start} to {end or 'no end'}; tables: {table}",
+             f"Times: {outage_history.time_zone_label(eng, market)}"]
+    has_active = long_lodf.supports_active_outages(eng, market)
+    if not has_active and table != "sched":
+        lines.append(f"Active table: not used for {market.upper()} (EnergyCore's active outage tools are MISO only), "
+                     "so every row is from the transmission table.")
+    if df.empty:
+        return "\n".join(lines + ["", "No outage records in this window."] + _warnings_section(warnings))
+    for t, label in (("act", "Active table"), ("sched", "Transmission table")):
+        part = df[df["table"] == t]
+        if table in ("comb", t) and (t == "sched" or has_active):
+            lines.append(f"{label}: {len(part)} rows" + (f", {int((part['overlaps'] == 'none').sum())} with no "
+                                                          "overlapping record in the other table"
+                                                          if table == "comb" and has_active else ""))
+    if counts["ignored_dropped"]:
+        lines.append(f"Dropped {counts['ignored_dropped']} request(s) the regression ignore rules exclude "
+                     "(apply_regression_ignore_rules=false lists them).")
+    if counts["planned_dropped"]:
+        lines.append(f"Dropped {counts['planned_dropped']} planned request(s) (include_planned=false).")
+    last = df[df["state"].isin(["completed", "in progress"])]
+    if not last.empty:
+        r = last.iloc[0]
+        lines.append(f"Last time out: {r['table']} {r['record_id']}, {_fmt_dt(r['actual_start'])} to "
+                     f"{_fmt_dt(r['actual_end']) if pd.notna(r['actual_end']) else 'still out'} ({r['state']})")
+
+    users = flags_lib.user_names(eng, df["user_id"].dropna().unique()) if "user_id" in df else {}
+    total = len(df)
+    shown = df if not max_rows else df.head(max_rows)
+    if len(shown) < total:
+        lines.append(f"(Showing the newest {len(shown)} of {total} rows; pass max_rows=0 for all.)")
+    group_map = long_lodf.groups_for_equipment(eng, market, ids)
+
+    header = ["table", "equipment_id", "name", "equipment_type", "kv", "group_ids", "record_id", "state",
+              "actual_start", "actual_end", "planned_start", "planned_end", "request_status", "duration_hr",
+              "overlaps", "annotations", "flag", "flagged_by", "flag_updated", "flag_note"]
+    lines += ["", "\t".join(header)]
+    for r in shown.to_dict("records"):
+        note = " ".join(str(r.get("notes") or "").split())
+        if max_note_chars and len(note) > max_note_chars:
+            note = note[:max_note_chars] + "..."
+        flag = r.get("flag_type")
+        flag = ("" if flag is None or (isinstance(flag, float) and pd.isna(flag)) else (flag or "note only"))
+        if flag and r.get("flagged_in") not in (None, market):
+            flag += f" (set in {str(r['flagged_in']).upper()})"
+        uid = r.get("user_id")
+        kv = r.get("kv")
+        row = [r["table"], links.md(str(r["equipment_id"]), links.outage(market, r["equipment_id"])), r["name"] or "",
+               r.get("equipment_type") or "", "" if kv is None or pd.isna(kv) else f"{float(kv):g}",
+               ", ".join(_group_label(market, g) for g in group_map.get(int(r["equipment_id"]), [])),
+               r["record_id"], r["state"], _fmt_dt(r["actual_start"]), _fmt_dt(r["actual_end"]),
+               _fmt_dt(r.get("planned_start")), _fmt_dt(r.get("planned_end")), "" if pd.isna(r.get("request_status")) else r["request_status"],
+               r["duration_hr"], r["overlaps"], r["annotations"], flag,
+               users.get(int(uid), "") if uid is not None and not pd.isna(uid) else "",
+               _fmt_dt(r.get("flag_updated")) if flag else "", note]
+        lines.append("\t".join(" ".join(str(c).split()) for c in row))
+    return "\n".join(lines + _warnings_section(warnings))
 
 
 def _equipment_label(market: str, equipment_id: str, names: dict) -> str:
@@ -2182,13 +2643,15 @@ def get_long_lodf_search(market: str, outage_id: str, id_type: str = "equipment"
     return "\n".join(lines + _warnings_section(warnings))
 
 
-_CENTRAL = zoneinfo.ZoneInfo("America/Chicago")
 # Elements named (with links) in each added/dropped list before the rest go as bare IDs.
 LIST_CAP = 25
 
 
+_CENTRAL = zoneinfo.ZoneInfo("America/Chicago")
+
+
 def _ct(value) -> str:
-    """A UTC naive datetime from the database, shown in Central time."""
+    """A UTC naive datetime from the database, in Central: run times are about the trader's own day."""
     if value is None or pd.isna(value):
         return ""
     return pd.Timestamp(value).tz_localize("UTC").tz_convert(_CENTRAL).strftime("%Y-%m-%d %H:%M CT")
@@ -2230,7 +2693,7 @@ def list_fid_runs(market: str, days: int = 2, include_adhoc: bool = True) -> str
     if not include_adhoc:
         df = df[df["kind"] == "scheduled"]
     lines = [f"{market.upper()} FID runs, market days {today - datetime.timedelta(days=days - 1)} to {today} "
-             "(times in Central)"]
+             "(run times in Central)"]
     if df.empty:
         return "\n".join(lines + ["", "No runs."])
     df = df.copy()

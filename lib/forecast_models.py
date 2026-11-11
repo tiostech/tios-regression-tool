@@ -34,7 +34,7 @@ import re
 import numpy as np
 import pandas as pd
 import yaml
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from lib import outage_search as osearch
 
@@ -100,6 +100,10 @@ def _check_market(market: str) -> None:
 def find_group(engine, market: str, constraint_id: int, day: datetime.date) -> tuple[dict | None, str | None]:
     """The model group forecasting ``constraint_id`` on ``day``, as (group, note).
 
+    Early groups (T+2, state early_finished) are not in the group-constraint join table until
+    they are promoted, so like EnergyCore's model groups page this also matches groups through
+    their models' constraints (``{market}_constraints_shadow_model_outputs``).
+
     When the constraint ID has no group, falls back to a group for another constraint on the
     same monitored element that day (IDs churn), and the note says so.
     """
@@ -109,9 +113,17 @@ def find_group(engine, market: str, constraint_id: int, day: datetime.date) -> t
                g.forecast_ceiling, g.forecast_floor, g.forecast_hourly_scaling_factors, g.constraint_allocation,
                g.constraint_allocation_mode, g.default_forecast, g.custom_forecast, g.created_at, g.updated_at,
                c.official_constraint_id AS group_constraint_id
-        FROM {market}_constraints_regression_model_groups c
-        JOIN {market}_regression_model_groups g ON g.id = c.regression_model_group_id
-        WHERE g.forecast_dt = :day AND c.official_constraint_id IN ({{ids}})
+        FROM {market}_regression_model_groups g
+        JOIN (SELECT regression_model_group_id AS group_id, official_constraint_id, 0 AS via_models
+              FROM {market}_constraints_regression_model_groups
+              WHERE official_constraint_id IN ({{ids}})
+              UNION ALL
+              SELECT o.shadow_model_group_id, cs.official_constraint_id, 1
+              FROM {market}_constraints_shadow_model_outputs cs
+              JOIN {market}_shadow_model_outputs o ON o.id = cs.shadow_model_output_id
+              WHERE cs.official_constraint_id IN ({{ids}})) c ON c.group_id = g.id
+        WHERE g.forecast_dt = :day
+        ORDER BY c.via_models, g.early, g.id DESC
     """
     with engine.connect() as conn:
         rows = conn.execute(text(query.format(ids=":c")), {"day": day, "c": constraint_id}).mappings().fetchall()
@@ -134,6 +146,38 @@ def find_group(engine, market: str, constraint_id: int, day: datetime.date) -> t
     for col in ("forecast_hourly_scaling_factors", "constraint_allocation", "default_forecast", "custom_forecast"):
         group[col] = load_yaml(group[col])
     return group, note
+
+
+def list_groups(engine, market: str, day: datetime.date, states=None, name=None, constraint_ids=None) -> pd.DataFrame:
+    """The model groups for a forecast day, largest estimated forecast first, with their model
+    counts and parsed constraint_allocation."""
+    _check_market(market)
+    where, params = ["g.forecast_dt = :day"], {"day": day}
+    if states:
+        where.append("g.group_state IN :states")
+        params["states"] = tuple(states)
+    if name:
+        where.append("g.name LIKE :name")
+        params["name"] = f"%{name}%"
+    if constraint_ids:
+        where.append(f"""g.id IN (SELECT o.shadow_model_group_id FROM {market}_constraints_shadow_model_outputs cs
+                                  JOIN {market}_shadow_model_outputs o ON o.id = cs.shadow_model_output_id
+                                  WHERE cs.official_constraint_id IN :cids)""")
+        params["cids"] = tuple(int(c) for c in constraint_ids)
+    query = text(f"""
+        SELECT g.id, g.name, g.group_state, g.mode, g.early, g.estimated_proposed_forecast, g.constraint_allocation,
+               (SELECT COUNT(*) FROM {market}_shadow_model_outputs o WHERE o.shadow_model_group_id = g.id) AS models
+        FROM {market}_regression_model_groups g
+        WHERE {" AND ".join(where)}
+        ORDER BY ABS(COALESCE(g.estimated_proposed_forecast, 0)) DESC, g.id
+    """)
+    for key in ("states", "cids"):
+        if key in params:
+            query = query.bindparams(bindparam(key, expanding=True))
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn, params=params)
+    df["constraint_allocation"] = df["constraint_allocation"].map(load_yaml)
+    return df
 
 
 def group_models(engine, market: str, group_id: int) -> pd.DataFrame:

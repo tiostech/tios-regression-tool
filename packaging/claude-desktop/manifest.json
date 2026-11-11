@@ -73,7 +73,11 @@
     {"name": "get_sced_shadow_prices", "description": "ERCOT shadow prices, flows, and limits from each SCED run, by run, hour, or day."},
     {"name": "get_long_lodf_search", "description": "EnergyCore's Long-LODF search for an outage: elements it loads, with RT shadow totals, using the market's preset."},
     {"name": "list_fid_runs", "description": "Recent FID assessment runs and how the latest run's element list changed."},
-    {"name": "get_fid_changes", "description": "The latest FID run's biggest upcoming risks and what changed since the previous run (needs AWS read access to the FID bucket)."}
+    {"name": "get_fid_changes", "description": "The latest FID run's biggest upcoming risks and what changed since the previous run (needs AWS read access to the FID bucket)."},
+    {"name": "get_outage_history", "description": "Every time an outage or its group was out, from both the active and transmission tables, for a last-time-out recap."},
+    {"name": "list_model_groups", "description": "A forecast day's regression model groups (T+2 too, before they are applied)."},
+    {"name": "get_nodal_prices", "description": "Nodal DA, RT and forecast LMPs with energy, congestion and loss, hourly or daily."},
+    {"name": "get_returns", "description": "Our actual trading returns split into energy, congestion and loss, by day, hour, or node (path for ERCOT)."}
   ],
   "tools_generated": false,
   "prompts_generated": true,
