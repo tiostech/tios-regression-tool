@@ -1113,9 +1113,13 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
     market time (MISO is fixed EST). Energy = LMP - congestion - loss. ERCOT has no loss
     component, and its congestion is derived (LMP minus average energy).
 
-    The FC LMP is built the way EnergyCore's bids build it: DA energy forecast + shadow-based RT
-    congestion forecast (fc_cong) + RT loss factor forecast x energy forecast (fc_loss).
-    fc_cong_default is the congestion forecast without the desk's shadow price forecasts.
+    The FC LMP is priced the way the market's most recent Lion proposal prices bids, without
+    the adder. Its template names the congestion forecast (fc_cong, currently the pure
+    shadow-based RT congestion forecast) and the loss factor (fc_lf, currently RT), and the
+    current version of the template's adder config names the energy forecast (fc_energy,
+    currently a flex DAEP), read as it stood at each day's day-ahead deadline. fc_loss is
+    fc_lf x fc_energy. The header names the proposal, template, config and forecasts used.
+    Markets without Lion proposals (ERCOT) get congestion and loss factor only.
 
     Args:
         market: miso, spp, pjm, ercot, or caiso.
@@ -1154,16 +1158,28 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
     df = pd.DataFrame(columns=keys)
     if "da" in show or "rt" in show:
         df = nodal_prices.actuals(eng, market, ids, start, end, today)
+    warnings = []
     if "fc" in show:
-        fc = nodal_prices.forecasts(eng, market, ids, start, end)
+        fc, lion = nodal_prices.forecasts(eng, market, ids, start, end, warn=warnings.append)
+        if lion:
+            energy = lion["energy_inc"] or "none"
+            if lion["energy_dec"] and lion["energy_dec"] != lion["energy_inc"]:
+                energy += f" (inc; dec bids use {lion['energy_dec']})"
+            lines.append(f"FC priced as Lion proposal {lion['proposal_id']} (trade day {lion['trade_dt']}), template "
+                         f"{lion['template']}, adder config {lion['adder_config']} (tios_config {lion['tios_config_id']}, "
+                         f"current): energy {energy}, congestion {lion['congestion_column']}, "
+                         f"loss factor {lion['loss_column']}.")
+        else:
+            lines.append(f"FC: no {market.upper()} Lion proposals, so no energy forecast; fc_cong is "
+                         "rt_congestion_forecast_pure_shadow_based and fc_lf rt_lf_forecast.")
         if not fc.empty:
             df = fc if df.empty else df.merge(fc, on=keys, how="outer")
 
     columns = {"da": ["da_lmp", "da_energy", "da_congestion", "da_loss"],
                "rt": ["rt_lmp", "rt_energy", "rt_congestion", "rt_loss", "rt_preliminary"],
-               "fc": ["fc_lmp", "fc_energy", "fc_congestion", "fc_loss", "fc_congestion_default"]}
+               "fc": ["fc_lmp", "fc_energy", "fc_congestion", "fc_loss", "fc_loss_factor"]}
     short = {"da_congestion": "da_cong", "rt_congestion": "rt_cong", "fc_congestion": "fc_cong",
-             "fc_congestion_default": "fc_cong_default", "rt_preliminary": "rt_prelim"}
+             "fc_loss_factor": "fc_lf", "rt_preliminary": "rt_prelim"}
     wanted = [c for k in show for c in columns[k] if c in df.columns]
     for p in pnodes.itertuples():
         rows = df[df["official_pnode_id"] == p.id].sort_values(["dt", "hr"]) if not df.empty else df
@@ -1178,6 +1194,9 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
         if missing:
             lines.append(f"No {', '.join(missing)} prices for this node in this range"
                          + (" (EnergyCore has no congestion forecast for it)." if "FC" in missing else "."))
+        if "fc" in show and "fc_energy" in rows.columns and rows["fc_congestion"].notna().any() \
+                and rows["fc_energy"].isna().all():
+            lines.append("No energy forecast for these days, so fc_lmp is blank; fc_cong and fc_lf are shown.")
         if rows.empty:
             continue
         if granularity == "day":
@@ -1193,7 +1212,7 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
                          "or pass max_rows=0.)")
         table = _tsv(rows.rename(columns=short), [short.get(c, c) for c in cols], decimals=2)
         lines += table
-    return "\n".join(lines)
+    return "\n".join(lines + _warnings_section(warnings))
 
 
 @server.tool(annotations=READ_ONLY)
