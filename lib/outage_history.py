@@ -243,10 +243,10 @@ def time_zone_label(engine, market: str) -> str:
         row = conn.execute(text("SELECT time_zone FROM markets WHERE urn = :u"), {"u": market}).fetchone()
     name = row[0] if row else None
     if name == "Etc/GMT+5":
-        return ("MISO market time: EST, UTC-5 all year (no daylight saving). Central time is 1 hour "
-                "earlier in winter and the same in summer.")
+        return ("MISO time: EST, UTC-5 all year (no daylight saving). Report them as given, labeled "
+                "\"EST (MISO time)\", not converted to Central.")
     zone = autoflow.RAILS_TIME_ZONES.get(name, name) if name else "unknown"
-    return f"{market.upper()} market local time ({zone}, with daylight saving)."
+    return f"{market.upper()} market time ({zone}, with daylight saving); report as given, labeled with the zone."
 
 
 def record_annotations(engine, market: str, ids, warn=_no_warn) -> pd.DataFrame:

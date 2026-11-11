@@ -73,6 +73,12 @@ server = MCPServer(
     name="energycore-outages",
     instructions=(
         "Read-only access to the trading desk's transmission outage search (tioscore_production). "
+        "Market data (outage times, shadow prices, LMPs, forecasts, hours) is in the market's own time: MISO is "
+        "EST all year (UTC-5, no daylight saving), SPP and ERCOT Central, PJM Eastern, CAISO Pacific. Hours are "
+        "hour ending 1-24 (HE 1 is 00:00-01:00, HE 24 is 23:00-24:00). Report market data in market time as the "
+        "tools give it, never converted, and label it, e.g. \"09:14 EST (MISO time)\" or \"HE 10 (market time)\". "
+        "Traders themselves work in Central, so times about their own day (when a run finished, when data will "
+        "be ready) are in Central, labeled CT, as the FID tools give them. "
         "Use list_upcoming_outages to find outages planned to start on a day, then "
         "get_outage_documentation for the outages that have history. The outage_briefing prompt "
         "holds the desk's report instructions. To explain why constraints bound on a day, use "
@@ -2479,13 +2485,15 @@ def get_long_lodf_search(market: str, outage_id: str, id_type: str = "equipment"
     return "\n".join(lines + _warnings_section(warnings))
 
 
-_CENTRAL = zoneinfo.ZoneInfo("America/Chicago")
 # Elements named (with links) in each added/dropped list before the rest go as bare IDs.
 LIST_CAP = 25
 
 
+_CENTRAL = zoneinfo.ZoneInfo("America/Chicago")
+
+
 def _ct(value) -> str:
-    """A UTC naive datetime from the database, shown in Central time."""
+    """A UTC naive datetime from the database, in Central: run times are about the trader's own day."""
     if value is None or pd.isna(value):
         return ""
     return pd.Timestamp(value).tz_localize("UTC").tz_convert(_CENTRAL).strftime("%Y-%m-%d %H:%M CT")
@@ -2527,7 +2535,7 @@ def list_fid_runs(market: str, days: int = 2, include_adhoc: bool = True) -> str
     if not include_adhoc:
         df = df[df["kind"] == "scheduled"]
     lines = [f"{market.upper()} FID runs, market days {today - datetime.timedelta(days=days - 1)} to {today} "
-             "(times in Central)"]
+             "(run times in Central)"]
     if df.empty:
         return "\n".join(lines + ["", "No runs."])
     df = df.copy()
