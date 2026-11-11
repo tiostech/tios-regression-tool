@@ -5,10 +5,11 @@ once both exist), and for today onward from ``{market}_da_lmp`` (has tomorrow) a
 ``{market}_rt_lmp`` (preliminary until settled, kept about 10 days). Hours are hour ending
 1-24 in market time (MISO fixed EST). Energy = LMP - congestion - loss.
 
-The forecast LMP is priced the way the most recent Lion proposal prices bids (Lion is the live
-nodal bidder; BidPriceFormula::CongestionNodalBidPriceFormula without the adder): the energy
-forecast in the current version of its template's adder config (tios_configs, energy_forecasts),
-plus the template's congestion forecast column, plus its loss factor column x energy.
+The forecast LMP is priced the way the market's live bidding prices bids, without the adder
+(BidPriceFormula): Lion (MISO, PJM, SPP, CAISO) adds the energy forecast in the current version
+of the newest Lion template's adder config, the template's congestion forecast column, and its
+loss factor column x energy. ERCOT bids are Tiger paths, priced with no energy forecast (energy
+0): the forecast is the template's congestion forecast column (ERCOT loss factors are 0).
 """
 
 import datetime
@@ -119,47 +120,62 @@ CONGESTION_COLUMNS = {"rt_congestion_forecast", "rt_congestion_forecast_load_adj
 LOSS_COLUMNS = {"da_lf_forecast", "rt_lf_forecast"}
 
 
-def lion_setup(engine, market: str, warn=_no_warn) -> dict | None:
-    """What the most recent Lion proposal prices with: its template's congestion and loss
-    columns and the energy forecasts in the current version of the template's adder config
-    (tios_configs). None when the market has no Lion proposals."""
+def _template(conn, market: str, kind: str) -> tuple[dict | None, dict]:
+    """The newest {kind} proposal and its template's params ({} when there is none)."""
+    prop = conn.execute(text(f"""
+        SELECT id, trade_dt, proposal_template_urn FROM {market}_{kind}_proposals ORDER BY id DESC LIMIT 1
+    """)).mappings().first()
+    if prop is None:
+        return None, {}
+    raw = conn.execute(text(f"SELECT params FROM {market}_{kind}_proposal_templates WHERE urn = :u"),
+                       {"u": prop["proposal_template_urn"]}).scalar()
+    return dict(prop), {str(k).lstrip(":"): v for k, v in (forecast_models.load_yaml(raw) or {}).items()}
+
+
+def bid_setup(engine, market: str, warn=_no_warn) -> dict | None:
+    """What the market's live bidding prices with. Lion markets (MISO, PJM, SPP, CAISO): the
+    newest Lion proposal's template columns and the energy forecasts in the current version of
+    its adder config (tios_configs). ERCOT: the newest Tiger proposal's template, which uses no
+    energy forecast (energy_forecast_column zero). None when neither exists."""
     try:
         with engine.connect() as conn:
-            prop = conn.execute(text(f"""
-                SELECT id, trade_dt, proposal_template_urn FROM {market}_lion_proposals ORDER BY id DESC LIMIT 1
-            """)).mappings().first()
+            prop, params, kind = None, {}, None
+            if market != "ercot":
+                prop, params = _template(conn, market, "lion")
+                kind = "lion" if prop else None
+            if prop is None:
+                prop, params = _template(conn, market, "tiger")
+                kind = "tiger" if prop else None
             if prop is None:
                 return None
-            raw = conn.execute(text(f"SELECT params FROM {market}_lion_proposal_templates WHERE urn = :u"),
-                               {"u": prop["proposal_template_urn"]}).scalar()
-            params = {str(k).lstrip(":"): v for k, v in (forecast_models.load_yaml(raw) or {}).items()}
-            cfg_name = params.get("adder_config_name")
+            cfg_name = params.get("adder_config_name") if kind == "lion" else None
             cfg = conn.execute(text("""
                 SELECT id, config FROM tios_configs WHERE name = :n AND current = 1 ORDER BY id DESC LIMIT 1
             """), {"n": cfg_name}).mappings().first() if cfg_name else None
     except Exception as e:
-        warn(f"Could not read the {market.upper()} Lion proposal setup: {e}")
+        warn(f"Could not read the {market.upper()} proposal setup: {e}")
         return None
     energy = (json.loads(cfg["config"]) or {}).get("energy_forecasts", {}) if cfg else {}
-    if not energy:
+    zero_energy = kind == "tiger" or params.get("energy_forecast_column") == "zero"
+    if kind == "lion" and not energy:
         warn(f"The {market.upper()} Lion adder config {cfg_name or '(none named)'} has no energy_forecasts.")
     cong = params.get("congestion_forecast_column", "rt_congestion_forecast_pure_shadow_based")
     loss = params.get("lossfactor_forecast_column", "rt_lf_forecast")
     if cong not in CONGESTION_COLUMNS or loss not in LOSS_COLUMNS:
-        raise ValueError(f"Unexpected Lion template columns: {cong}, {loss}")
-    return {"proposal_id": prop["id"], "trade_dt": prop["trade_dt"], "template": prop["proposal_template_urn"],
+        raise ValueError(f"Unexpected {kind} template columns: {cong}, {loss}")
+    return {"kind": kind, "proposal_id": prop["id"], "trade_dt": prop["trade_dt"], "template": prop["proposal_template_urn"],
             "adder_config": cfg_name, "tios_config_id": cfg["id"] if cfg else None,
-            "energy_inc": energy.get("inc"), "energy_dec": energy.get("dec"),
-            "congestion_column": cong, "loss_column": loss}
+            "energy_inc": None if zero_energy else energy.get("inc"), "energy_dec": None if zero_energy else energy.get("dec"),
+            "zero_energy": zero_energy, "congestion_column": cong, "loss_column": loss}
 
 
 def forecasts(engine, market: str, pnode_ids: list[int], start: datetime.date, end: datetime.date,
               warn=_no_warn) -> tuple[pd.DataFrame, dict | None]:
-    """Hourly forecast LMP and its parts per node and trade day, priced as the most recent
-    Lion proposal's template and current adder config price bids (without the adder). Energy is
-    read as it stood at each day's day-ahead deadline. Returns (rows, lion_setup)."""
+    """Hourly forecast LMP and its parts per node and trade day, priced as the market's live
+    bidding prices bids (without the adder; see bid_setup). Energy is read as it stood at each
+    day's day-ahead deadline. Returns (rows, bid_setup)."""
     _check_market(market)
-    setup = lion_setup(engine, market, warn)
+    setup = bid_setup(engine, market, warn)
     cong_col = setup["congestion_column"] if setup else "rt_congestion_forecast_pure_shadow_based"
     loss_col = setup["loss_column"] if setup else "rt_lf_forecast"
     params = {"ids": [int(i) for i in pnode_ids], "s": start, "e": end}
@@ -186,7 +202,9 @@ def forecasts(engine, market: str, pnode_ids: list[int], start: datetime.date, e
             if "fc_energy" in df:
                 energy.append(df.assign(dt=day)[["dt", "hr", "fc_energy"]])
     df = cong.merge(loss, on=["dt", "official_pnode_id"], how="left")
-    if energy:
+    if setup and setup["zero_energy"]:
+        df["fc_energy"] = 0.0
+    elif energy:
         df = df.merge(pd.concat(energy, ignore_index=True), on=["dt", "hr"], how="left")
     else:
         df["fc_energy"] = float("nan")

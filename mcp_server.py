@@ -1113,13 +1113,14 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
     market time (MISO is fixed EST). Energy = LMP - congestion - loss. ERCOT has no loss
     component, and its congestion is derived (LMP minus average energy).
 
-    The FC LMP is priced the way the market's most recent Lion proposal prices bids, without
-    the adder. Its template names the congestion forecast (fc_cong, currently the pure
-    shadow-based RT congestion forecast) and the loss factor (fc_lf, currently RT), and the
-    current version of the template's adder config names the energy forecast (fc_energy,
-    currently a flex DAEP), read as it stood at each day's day-ahead deadline. fc_loss is
-    fc_lf x fc_energy. The header names the proposal, template, config and forecasts used.
-    Markets without Lion proposals (ERCOT) get congestion and loss factor only.
+    The FC LMP is priced the way the market's live bidding prices bids, without the adder.
+    Lion markets (MISO, PJM, SPP, CAISO): the newest Lion proposal's template names the
+    congestion forecast (fc_cong, currently the pure shadow-based RT congestion forecast) and
+    loss factor (fc_lf, currently RT), and the current version of its adder config names the
+    energy forecast (fc_energy, currently a flex DAEP), read as it stood at each day's
+    day-ahead deadline; fc_loss is fc_lf x fc_energy. ERCOT bids are Tiger paths, priced with
+    no energy forecast: fc_energy is 0 and the FC LMP is the Tiger template's congestion
+    forecast. The header names the proposal, template, config and forecasts used.
 
     Args:
         market: miso, spp, pjm, ercot, or caiso.
@@ -1161,7 +1162,7 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
     warnings = []
     if "fc" in show:
         fc, lion = nodal_prices.forecasts(eng, market, ids, start, end, warn=warnings.append)
-        if lion:
+        if lion and lion["kind"] == "lion":
             energy = lion["energy_inc"] or "none"
             if lion["energy_dec"] and lion["energy_dec"] != lion["energy_inc"]:
                 energy += f" (inc; dec bids use {lion['energy_dec']})"
@@ -1169,8 +1170,12 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
                          f"{lion['template']}, adder config {lion['adder_config']} (tios_config {lion['tios_config_id']}, "
                          f"current): energy {energy}, congestion {lion['congestion_column']}, "
                          f"loss factor {lion['loss_column']}.")
+        elif lion:
+            lines.append(f"FC priced as Tiger proposal {lion['proposal_id']} (trade day {lion['trade_dt']}), template "
+                         f"{lion['template']}: no energy forecast (energy 0), congestion {lion['congestion_column']}, "
+                         f"loss factor {lion['loss_column']}. The FC LMP is the congestion forecast.")
         else:
-            lines.append(f"FC: no {market.upper()} Lion proposals, so no energy forecast; fc_cong is "
+            lines.append(f"FC: no {market.upper()} Lion or Tiger proposals, so no energy forecast; fc_cong is "
                          "rt_congestion_forecast_pure_shadow_based and fc_lf rt_lf_forecast.")
         if not fc.empty:
             df = fc if df.empty else df.merge(fc, on=keys, how="outer")
