@@ -1122,6 +1122,10 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
     no energy forecast: fc_energy is 0 and the FC LMP is the Tiger template's congestion
     forecast. The header names the proposal, template, config and forecasts used.
 
+    Every day, past ones included, is priced with today's setup: a back test of the current
+    setup, which is usually what traders want. It is not necessarily what was bid on a past
+    day (configs change), so don't use it for returns or "what did we bid"; say so if asked.
+
     Args:
         market: miso, spp, pjm, ercot, or caiso.
         nodes: Pnode names (e.g. "INDIANA.HUB", "51288-WESTERNHUB", "HB_NORTH"), market pnode
@@ -1169,7 +1173,7 @@ def get_nodal_prices(market: str, nodes: list[str], start_date: str | None = Non
             lines.append(f"FC priced as Lion proposal {lion['proposal_id']} (trade day {lion['trade_dt']}), template "
                          f"{lion['template']}, adder config {lion['adder_config']} (tios_config {lion['tios_config_id']}, "
                          f"current): energy {energy}, congestion {lion['congestion_column']}, "
-                         f"loss factor {lion['loss_column']}.")
+                         f"loss factor {lion['loss_column']}. Past days use this current setup (a back test).")
         elif lion:
             lines.append(f"FC priced as Tiger proposal {lion['proposal_id']} (trade day {lion['trade_dt']}), template "
                          f"{lion['template']}: no energy forecast (energy 0), congestion {lion['congestion_column']}, "
